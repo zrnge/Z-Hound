@@ -3,7 +3,7 @@
 > **Client-side Active Directory attack path visualizer for SharpHound / BloodHound data.**
 > No server. No install. Drop in a ZIP, get an interactive graph.
 
-![Z-Hound Screenshot](https://raw.githubusercontent.com/zrnge/zhound/main/screenshot.png)
+![Z-Hound Screenshot](https://raw.githubusercontent.com/zrnge/zhound/main/Z-Hound.png)
 
 ---
 
