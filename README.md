@@ -24,6 +24,8 @@ Built for pentesters, red teamers, and defenders who need fast, offline AD analy
 - Pan, zoom, box-select, click-to-inspect
 - **Export PNG** — full graph at 2× resolution, dark background
 
+![Z-Hound Screenshot](https://raw.githubusercontent.com/zrnge/Z-Hound/refs/heads/main/Z-Hound_domain_trust.png)
+
 ### Risk Scoring Engine
 Every node is scored **0–100** automatically based on:
 
