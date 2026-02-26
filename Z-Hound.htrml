@@ -1,0 +1,1252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Z-Hound - Reforged</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <script>
+        tailwind.config = {
+            theme: { extend: { colors: { dark: '#1e1e26', panel: '#252530', accent: '#7289da' } } }
+        }
+    </script>
+    <style>
+        body { overflow: hidden; }
+        #cy { width: 100%; height: 100%; }
+        .tab-btn { flex: 1; padding: 6px 8px; font-size: 11px; transition: all .15s; color: #9ca3af; cursor: pointer; border-bottom: 2px solid transparent; }
+        .tab-btn:hover { background: #374151; color: #fff; }
+        .tab-btn.active { color: #fff; border-bottom-color: #7289da; }
+        .risk-critical { color: #e74c3c; }
+        .risk-high { color: #e67e22; }
+        .risk-medium { color: #f1c40f; }
+        .risk-low { color: #2ecc71; }
+        .node-link { cursor: pointer; font-size: 11px; padding: 2px 4px; border-radius: 3px; }
+        .node-link:hover { background: #374151; color: #fff; }
+        ::-webkit-scrollbar { width: 5px; height: 5px; }
+        ::-webkit-scrollbar-track { background: #1e1e26; }
+        ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
+    </style>
+</head>
+<body class="bg-dark text-white h-screen flex flex-col font-sans">
+
+    <!-- ===== HEADER ===== -->
+    <header class="bg-panel border-b border-gray-700 px-4 py-2.5 flex items-center justify-between shrink-0">
+        <div class="flex items-center gap-3">
+            <h1 class="text-lg font-bold text-accent">Z-Hound <span class="text-gray-500 text-xs font-normal">Reforged</span></h1>
+
+            <label class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded cursor-pointer text-xs font-semibold transition">
+                &#128193; Upload ZIP / JSON
+                <input type="file" id="zipInput" accept=".zip,.json" class="hidden" multiple>
+            </label>
+
+            <button onclick="clearGraph()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Clear</button>
+            <button onclick="exportPNG()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export PNG</button>
+        </div>
+
+        <div class="flex items-center gap-2">
+            <div class="relative w-60">
+                <input type="text" id="searchInput" placeholder="Search object name..."
+                    class="bg-gray-800 text-white px-3 py-1.5 rounded text-xs w-full border border-gray-600 focus:outline-none focus:border-accent"
+                    oninput="handleSearchInput()" onfocus="handleSearchInput()">
+                <ul id="searchSuggestions" class="absolute z-50 w-full bg-gray-700 border border-gray-600 rounded mt-1 hidden max-h-48 overflow-y-auto shadow-xl"></ul>
+            </div>
+            <button onclick="findPathToDA()" class="bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded text-xs font-bold transition">&#128293; Find DA Path</button>
+            <button onclick="findAllPaths()" class="bg-orange-700 hover:bg-orange-600 px-3 py-1.5 rounded text-xs font-bold transition">All Paths</button>
+        </div>
+    </header>
+
+    <!-- ===== STATS BAR ===== -->
+    <div id="statsBar" class="hidden bg-gray-900 border-b border-gray-700 px-5 py-1.5 flex items-center gap-5 text-xs shrink-0 flex-wrap">
+        <span class="text-gray-400">Objects: <span id="statObjects" class="text-white font-bold">0</span></span>
+        <span class="text-gray-400">Edges: <span id="statEdges" class="text-white font-bold">0</span></span>
+        <span class="text-yellow-400">Kerberoastable: <span id="statKerb" class="font-bold">0</span></span>
+        <span class="text-orange-400">AS-REP Roastable: <span id="statAsrep" class="font-bold">0</span></span>
+        <span class="text-red-400">DCSync Risk: <span id="statDcsync" class="font-bold">0</span></span>
+        <span class="text-red-300">Critical ACLs: <span id="statAcls" class="font-bold">0</span></span>
+        <span class="text-pink-400">Paths to DA: <span id="statPaths" class="font-bold">-</span></span>
+        <button onclick="findAllPaths(); switchTab('paths')" class="ml-auto text-xs text-gray-400 hover:text-white underline">Enumerate all paths</button>
+    </div>
+
+    <!-- ===== CONTROLS BAR ===== -->
+    <div class="bg-gray-800 border-b border-gray-700 py-1.5 px-4 flex flex-wrap items-center gap-3 shrink-0 text-xs">
+        <span class="text-gray-500 font-semibold">Filters:</span>
+
+        <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
+            <input type="checkbox" id="hideOrphans" checked class="accent-blue-600" onchange="renderGraph()"> Hide Orphans
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
+            <input type="checkbox" id="showMemberOf" checked class="accent-blue-600" onchange="renderGraph()"> MemberOf
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
+            <input type="checkbox" id="showAcls" checked class="accent-blue-600" onchange="renderGraph()"> ACLs
+        </label>
+        <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
+            <input type="checkbox" id="showExec" checked class="accent-blue-600" onchange="renderGraph()"> Exec/Admin
+        </label>
+
+        <div class="w-px h-4 bg-gray-600"></div>
+
+        <span class="text-accent font-semibold">Quick View:</span>
+        <select id="quickView" class="bg-gray-700 text-white rounded px-2 py-1 outline-none text-xs border border-gray-600 focus:border-accent" onchange="renderGraph()">
+            <option value="none">-- Show All --</option>
+        </select>
+
+        <div class="w-px h-4 bg-gray-600"></div>
+
+        <span class="text-gray-500">Layout:</span>
+        <select id="layoutSel" class="bg-gray-700 text-white rounded px-2 py-1 outline-none text-xs border border-gray-600 focus:border-accent" onchange="applyLayout()">
+            <option value="dagre">Hierarchical</option>
+            <option value="breadthfirst">Breadth-First</option>
+            <option value="cose">Force-Directed</option>
+            <option value="concentric">Concentric</option>
+            <option value="grid">Grid</option>
+        </select>
+
+        <span class="text-gray-500">Labels:</span>
+        <select id="labelMode" class="bg-gray-700 text-white rounded px-2 py-1 outline-none text-xs border border-gray-600 focus:border-accent" onchange="updateLabels()">
+            <option value="short">Short</option>
+            <option value="full">Full</option>
+            <option value="type">Type Only</option>
+        </select>
+
+        <button onclick="resetView()" class="ml-auto bg-accent hover:bg-blue-500 text-white px-3 py-1 rounded text-xs transition">Fit View</button>
+        <button onclick="resetHighlight()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs transition">Clear Highlight</button>
+    </div>
+
+    <!-- ===== MAIN ===== -->
+    <main class="flex-1 flex overflow-hidden">
+
+        <!-- Left Panel -->
+        <div id="leftPanel" class="bg-panel flex flex-col border-r border-gray-700 shrink-0" style="width:310px; min-width:180px; max-width:550px;">
+            <!-- Tabs -->
+            <div class="flex border-b border-gray-700 shrink-0">
+                <button class="tab-btn active" id="tab-details" onclick="switchTab('details')">Node Details</button>
+                <button class="tab-btn" id="tab-paths" onclick="switchTab('paths')">Attack Paths</button>
+                <button class="tab-btn" id="tab-stats" onclick="switchTab('stats')">Risk Report</button>
+            </div>
+
+            <!-- Details Pane -->
+            <div id="pane-details" class="flex-1 overflow-y-auto p-3">
+                <div class="text-gray-500 text-center text-xs mt-12">Click any node to inspect it</div>
+            </div>
+
+            <!-- Paths Pane -->
+            <div id="pane-paths" class="hidden flex-1 overflow-y-auto p-3">
+                <div class="text-gray-500 text-center text-xs mt-12">Use "Find DA Path" or "All Paths" above</div>
+            </div>
+
+            <!-- Stats Pane -->
+            <div id="pane-stats" class="hidden flex-1 overflow-y-auto p-3">
+                <div class="text-gray-500 text-center text-xs mt-12">Upload data to see risk report</div>
+            </div>
+        </div>
+
+        <!-- Resizer -->
+        <div id="resizer" class="w-1 bg-gray-700 hover:bg-accent cursor-col-resize transition-colors shrink-0 z-20"></div>
+
+        <!-- Graph Panel -->
+        <div class="flex-1 relative overflow-hidden bg-dark">
+            <div id="cy"></div>
+
+            <div id="statusMessage" class="absolute inset-0 flex items-center justify-center text-gray-600 pointer-events-none font-semibold text-center px-10 text-sm">
+                Upload a SharpHound ZIP or JSON file to begin
+            </div>
+
+            <!-- Legend -->
+            <div class="absolute bottom-4 left-4 bg-panel border border-gray-700 rounded p-2.5 text-xs text-gray-300 z-10 shadow-lg">
+                <div class="font-semibold text-gray-400 mb-1.5 border-b border-gray-700 pb-1">Legend</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#3498db]"></span>User</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#2ecc71]"></span>Group</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-sm inline-block bg-[#e67e22]"></span>Computer</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rotate-45 inline-block bg-[#8e44ad]" style="display:inline-block;width:10px;height:10px;background:#8e44ad;transform:rotate(45deg)"></span> Domain</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#95a5a6]"></span>GPO/OU</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#d35400]"></span>Cert</div>
+                <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-sm inline-block bg-[#f1c40f] border border-[#e67e22]"></span>High Value</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>DCSync</div>
+            </div>
+
+            <!-- Zoom Controls -->
+            <div class="absolute bottom-4 right-4 flex gap-1 bg-panel border border-gray-700 rounded p-1 z-10 shadow-lg">
+                <button onclick="cy && cy.zoom(cy.zoom()*1.3); cy && cy.center()" class="bg-gray-700 hover:bg-gray-600 px-2.5 py-1 rounded font-bold text-sm transition">+</button>
+                <button onclick="cy && cy.zoom(cy.zoom()*0.77); cy && cy.center()" class="bg-gray-700 hover:bg-gray-600 px-2.5 py-1 rounded font-bold text-sm transition">&#8722;</button>
+                <button onclick="resetView()" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs transition">Fit</button>
+            </div>
+        </div>
+    </main>
+
+    <script>
+    // ================================================================
+    // DATA STORE
+    // ================================================================
+    let adNodes  = {};   // id (uppercase) -> node object
+    let adEdges  = [];   // { from, to, label, isAcl, riskWeight }
+    let cy       = null;
+    let foundPaths = [];
+
+    // ================================================================
+    // RISK ENGINE
+    // ================================================================
+    const EDGE_RISK = {
+        GenericAll:100, WriteDacl:90, WriteOwner:90, Owns:85,
+        ForceChangePassword:80, AddMember:75, AddKeyCredentialLink:90,
+        ReadLAPSPassword:70, AllExtendedRights:80, GenericWrite:80,
+        WriteProperty:65, AdminTo:85, CanRDP:50, ExecuteDCOM:55,
+        CanPSRemote:50, GetChangesAll:95, GetChanges:45,
+        AllowedToDelegate:70, AllowedToAct:75, ManageCA:90,
+        ManageCertificates:85, Enroll:50, TrustedBy:40,
+        GPLink:30, MemberOf:10, SQLAdmin:60, HasSession:35,
+        CanAbuseGPO:65, AddSelf:70, WriteAccountRestrictions:65
+    };
+
+    const HIGH_RISK_ACLS = new Set([
+        'GenericAll','WriteDacl','WriteOwner','Owns',
+        'ForceChangePassword','AddMember','AddKeyCredentialLink',
+        'ReadLAPSPassword','AllExtendedRights','GenericWrite',
+        'WriteProperty','AddSelf','WriteAccountRestrictions'
+    ]);
+
+    const EXEC_EDGES = new Set([
+        'AdminTo','CanRDP','ExecuteDCOM','CanPSRemote',
+        'AllowedToDelegate','AllowedToAct','SQLAdmin','HasSession','CanAbuseGPO'
+    ]);
+
+    const ACL_EDGES = new Set([
+        ...HIGH_RISK_ACLS,
+        'GetChanges','GetChangesAll','Enroll','ManageCA','ManageCertificates'
+    ]);
+
+    function calcNodeRisk(node) {
+        let score = 0;
+        const flags = [];
+        const p = node.props || {};
+
+        if (p.hasspn        && p.enabled !== false) { score += 40; flags.push('Kerberoastable'); }
+        if (p.dontreqpreauth && p.enabled !== false) { score += 45; flags.push('AS-REP Roastable'); }
+        if (p.unconstraineddelegation)               { score += 60; flags.push('Unconstrained Delegation'); }
+        if (p.constraineddelegation)                 { score += 30; flags.push('Constrained Delegation'); }
+        if (p.pwdneverexpires && p.enabled !== false){ score += 20; flags.push('Password Never Expires'); }
+        if (p.admincount)                            { score += 15; flags.push('AdminCount=1'); }
+        if (p.sidhistory && p.sidhistory.length > 0) { score += 35; flags.push('SID History'); }
+        if (p.dontexpirepassword)                    { score += 10; }
+        if (p.enabled === false)                     { score -= 40; flags.push('Disabled'); }
+        if (node.isAdmin)                            { score += 50; }
+        if (node.canDCSync)                          { score += 95; }
+
+        return { score: Math.max(0, Math.min(100, score)), flags };
+    }
+
+    function getRiskColor(score) {
+        if (score >= 70) return '#e74c3c';
+        if (score >= 40) return '#e67e22';
+        if (score >= 20) return '#f1c40f';
+        return '#2ecc71';
+    }
+
+    function getRiskLabel(score) {
+        if (score >= 70) return 'Critical';
+        if (score >= 40) return 'High';
+        if (score >= 20) return 'Medium';
+        return 'Low';
+    }
+
+    // ================================================================
+    // PARSING
+    // ================================================================
+    function parseFile(json, filename) {
+        // BloodHound v4/v5: graph object with nodes/edges
+        if (json.graph && (json.graph.nodes || json.graph.edges || json.graph.relationships)) {
+            parseV4Graph(json.graph);
+            return;
+        }
+        // BloodHound v4 alternate: top-level nodes/relationships
+        if (json.nodes && json.relationships) {
+            parseV4Graph(json);
+            return;
+        }
+
+        let items = json.data || (Array.isArray(json) ? json : []);
+        if (items.length === 0) return;
+
+        const fn = filename.toLowerCase();
+        let fileType = 'Unknown';
+        if      (fn.includes('user'))      fileType = 'User';
+        else if (fn.includes('group'))     fileType = 'Group';
+        else if (fn.includes('computer'))  fileType = 'Computer';
+        else if (fn.includes('domain'))    fileType = 'Domain';
+        else if (fn.includes('gpo'))       fileType = 'GPO';
+        else if (fn.includes('ou'))        fileType = 'OU';
+        else if (fn.includes('cert'))      fileType = 'CertTemplate';
+        else if (fn.includes('container')) fileType = 'Container';
+
+        items.forEach(item => {
+            const props = item.Properties || {};
+            const rawName = props.name || item.ObjectIdentifier || item.Name || '';
+            const name = rawName.toUpperCase();
+            if (!name) return;
+
+            // Detect type from item.ObjectType if available
+            let detectedType = fileType;
+            if (item.ObjectType) {
+                const ot = item.ObjectType.toLowerCase();
+                if      (ot === 'user')         detectedType = 'User';
+                else if (ot === 'group')        detectedType = 'Group';
+                else if (ot === 'computer')     detectedType = 'Computer';
+                else if (ot === 'domain')       detectedType = 'Domain';
+                else if (ot === 'gpo')          detectedType = 'GPO';
+                else if (ot === 'ou')           detectedType = 'OU';
+                else if (ot === 'certtemplate') detectedType = 'CertTemplate';
+                else if (ot === 'container')    detectedType = 'Container';
+            }
+
+            const isAdmin = name.includes('DOMAIN ADMINS') ||
+                            name.includes('ENTERPRISE ADMINS') ||
+                            name.includes('ADMINISTRATORS') ||
+                            props.highvalue === true;
+
+            if (!adNodes[name]) {
+                adNodes[name] = { name, type: detectedType, isAdmin, props: { ...props } };
+            } else {
+                Object.assign(adNodes[name].props, props);
+                if (!adNodes[name].isAdmin) adNodes[name].isAdmin = isAdmin;
+                if (adNodes[name].type === 'Unknown') adNodes[name].type = detectedType;
+            }
+
+            const addEdge = (from, to, label, isAcl = false) => {
+                from = from.toUpperCase();
+                to   = to.toUpperCase();
+                if (!from || !to || from === to) return;
+                if (!adNodes[from]) adNodes[from] = { name: from, type: 'Unknown', isAdmin: false, props: {} };
+                if (!adNodes[to])   adNodes[to]   = { name: to,   type: 'Unknown', isAdmin: false, props: {} };
+                if (!adEdges.some(e => e.from === from && e.to === to && e.label === label)) {
+                    adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
+                }
+            };
+
+            const parseArr = (arr, label, reverse = false) => {
+                const list = Array.isArray(arr) ? arr : (arr?.Results || []);
+                list.forEach(t => {
+                    const tid = (t.ObjectIdentifier || t.TargetId || t.GUID || '').toUpperCase();
+                    if (!tid) return;
+                    reverse ? addEdge(tid, name, label) : addEdge(name, tid, label);
+                });
+            };
+
+            parseArr(item.Members,          'MemberOf',          false);
+            parseArr(item.LocalAdmins,      'AdminTo',           true);
+            parseArr(item.RemoteDesktopUsers,'CanRDP',           true);
+            parseArr(item.DcomUsers,        'ExecuteDCOM',       true);
+            parseArr(item.PSRemoteUsers,    'CanPSRemote',       true);
+            parseArr(item.AllowedToDelegate,'AllowedToDelegate', false);
+            parseArr(item.AllowedToAct,     'AllowedToAct',      true);
+            parseArr(item.Links,            'GPLink',            false);
+            parseArr(item.AllowedToEnroll,  'Enroll',            true);
+            parseArr(item.SQLAdmins,        'SQLAdmin',          true);
+
+            // ACEs
+            (item.Aces || []).forEach(ace => {
+                const pName = (ace.PrincipalName || '').toUpperCase();
+                const right = ace.RightName || '';
+                if (pName && right) {
+                    if (!adNodes[pName]) adNodes[pName] = {
+                        name: pName, type: ace.PrincipalType || 'Unknown', isAdmin: false, props: {}
+                    };
+                    addEdge(pName, name, right, HIGH_RISK_ACLS.has(right));
+                }
+            });
+
+            // Sessions
+            (item.Sessions?.Results || []).forEach(s => {
+                const user = (s.UserSID || s.UserId || '').toUpperCase();
+                if (user) addEdge(name, user, 'HasSession', false);
+            });
+
+            // Domain trusts
+            (item.Trusts || []).forEach(trust => {
+                const target = (trust.TargetDomainName || '').toUpperCase();
+                if (!target) return;
+                const dir = trust.TrustDirection;
+                if (dir === 1 || dir === 3 || dir === 'Inbound' || dir === 'Bidirectional')
+                    addEdge(target, name, 'TrustedBy');
+                if (dir === 2 || dir === 3 || dir === 'Outbound' || dir === 'Bidirectional')
+                    addEdge(name, target, 'TrustedBy');
+            });
+        });
+    }
+
+    function parseV4Graph(graph) {
+        (graph.nodes || []).forEach(node => {
+            const id    = (node.id || '').toUpperCase();
+            const props = node.properties || {};
+            const name  = (props.name || id).toUpperCase();
+            const type  = (node.label || node.type || 'Unknown');
+            const isAdmin = props.highvalue ||
+                            name.includes('DOMAIN ADMINS') ||
+                            name.includes('ENTERPRISE ADMINS');
+            if (id) adNodes[id] = { name, type, isAdmin, props };
+        });
+
+        const rels = graph.edges || graph.relationships || [];
+        rels.forEach(edge => {
+            const from  = (edge.startNode || edge.source || edge.start || '').toUpperCase();
+            const to    = (edge.endNode   || edge.target || edge.end   || '').toUpperCase();
+            const label = edge.type || edge.label || '';
+            if (from && to && label) {
+                if (!adEdges.some(e => e.from === from && e.to === to && e.label === label)) {
+                    adEdges.push({
+                        from, to, label,
+                        isAcl: HIGH_RISK_ACLS.has(label),
+                        riskWeight: EDGE_RISK[label] || 10
+                    });
+                }
+            }
+        });
+    }
+
+    // ================================================================
+    // DCSync DETECTION
+    // ================================================================
+    function detectDCSync() {
+        let count = 0;
+        const domainIds = Object.keys(adNodes).filter(id => adNodes[id].type === 'Domain');
+
+        domainIds.forEach(domain => {
+            const getChanges    = new Set(adEdges.filter(e => e.to === domain && e.label === 'GetChanges').map(e => e.from));
+            const getChangesAll = new Set(adEdges.filter(e => e.to === domain && e.label === 'GetChangesAll').map(e => e.from));
+            const allExt        = new Set(adEdges.filter(e => e.to === domain && e.label === 'AllExtendedRights').map(e => e.from));
+
+            const markDCSync = (pid, reason) => {
+                if (!adNodes[pid]) return;
+                const n = adNodes[pid];
+                n.canDCSync = true;
+                n.riskFlags = n.riskFlags || [];
+                if (!n.riskFlags.includes(reason)) n.riskFlags.push(reason);
+                count++;
+            };
+
+            getChangesAll.forEach(pid => {
+                if (getChanges.has(pid)) markDCSync(pid, 'DCSync (GetChanges+GetChangesAll)');
+            });
+            allExt.forEach(pid => markDCSync(pid, 'DCSync (AllExtendedRights)'));
+        });
+
+        return count;
+    }
+
+    // ================================================================
+    // STATISTICS
+    // ================================================================
+    function computeStats() {
+        const vals = Object.values(adNodes);
+        const kerb   = vals.filter(n => n.props?.hasspn        && n.props?.enabled !== false).length;
+        const asrep  = vals.filter(n => n.props?.dontreqpreauth && n.props?.enabled !== false).length;
+        const dcsync = detectDCSync();
+        const crits  = adEdges.filter(e => ['GenericAll','WriteDacl','WriteOwner','AddKeyCredentialLink'].includes(e.label)).length;
+
+        document.getElementById('statObjects').textContent = Object.keys(adNodes).length;
+        document.getElementById('statEdges').textContent   = adEdges.length;
+        document.getElementById('statKerb').textContent    = kerb;
+        document.getElementById('statAsrep').textContent   = asrep;
+        document.getElementById('statDcsync').textContent  = dcsync;
+        document.getElementById('statAcls').textContent    = crits;
+        document.getElementById('statPaths').textContent   = '?';
+        document.getElementById('statsBar').classList.remove('hidden');
+    }
+
+    // ================================================================
+    // BFS PATH FINDER
+    // ================================================================
+    function bfsPath(startNode, targetSet) {
+        if (!startNode || !adNodes[startNode]) return null;
+        if (targetSet.has(startNode)) return [startNode];
+        const queue   = [[startNode]];
+        const visited = new Set([startNode]);
+        while (queue.length > 0) {
+            const path    = queue.shift();
+            const current = path[path.length - 1];
+            for (const edge of adEdges) {
+                if (edge.from !== current) continue;
+                const next = edge.to;
+                if (visited.has(next)) continue;
+                const newPath = [...path, next];
+                if (targetSet.has(next)) return newPath;
+                visited.add(next);
+                queue.push(newPath);
+            }
+        }
+        return null;
+    }
+
+    function findPathToDA() {
+        const query = document.getElementById('searchInput').value.toUpperCase().trim();
+        if (!query) { alert('Enter an object name to search'); return; }
+
+        const startNode = Object.keys(adNodes).find(n => n.includes(query));
+        if (!startNode) { alert('No object matching: ' + query); return; }
+        document.getElementById('searchInput').value = startNode;
+
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        if (daSet.size === 0) { alert('No high-value / Domain Admin targets found in data'); return; }
+
+        const path = bfsPath(startNode, daSet);
+        if (!path) {
+            document.getElementById('statusMessage').innerText = 'No path to DA found from ' + startNode;
+            return;
+        }
+        document.getElementById('statusMessage').innerText = '';
+        foundPaths = [{ from: startNode, path, hops: path.length - 1 }];
+        renderPathsPanel();
+        switchTab('paths');
+        highlightPath(path);
+    }
+
+    function findAllPaths() {
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        if (daSet.size === 0) { alert('No high-value targets found'); return; }
+
+        foundPaths = [];
+        const users = Object.keys(adNodes).filter(n => adNodes[n].type === 'User' && !adNodes[n].isAdmin);
+        users.forEach(n => {
+            const path = bfsPath(n, daSet);
+            if (path) foundPaths.push({ from: n, path, hops: path.length - 1 });
+        });
+        foundPaths.sort((a, b) => a.hops - b.hops);
+
+        document.getElementById('statPaths').textContent = foundPaths.length;
+        renderPathsPanel();
+        switchTab('paths');
+        document.getElementById('statusMessage').innerText = '';
+    }
+
+    function highlightPath(pathNodes) {
+        if (!cy) return;
+        resetHighlight();
+
+        const pathSet = new Set(pathNodes);
+        const pathEdgeIds = new Set();
+        for (let i = 0; i < pathNodes.length - 1; i++) {
+            const from = pathNodes[i], to = pathNodes[i + 1];
+            adEdges.filter(e => e.from === from && e.to === to)
+                   .forEach(e => pathEdgeIds.add(edgeId(e)));
+        }
+
+        cy.nodes().style({ opacity: 0.1 });
+        cy.edges().style({ opacity: 0.04 });
+
+        pathNodes.forEach(nid => {
+            const el = cy.getElementById(nid);
+            if (el.length) el.style({ opacity: 1 });
+        });
+        cy.edges().forEach(e => {
+            const id = `${e.data('source')}__${e.data('target')}__${e.data('label')}`;
+            if (pathEdgeIds.has(id)) {
+                e.style({ opacity: 1, width: 4, lineColor: '#e74c3c', targetArrowColor: '#e74c3c' });
+            }
+        });
+    }
+
+    function edgeId(e) { return `${e.from}__${e.to}__${e.label}`; }
+
+    // ================================================================
+    // CYTOSCAPE GRAPH
+    // ================================================================
+    const NODE_COLORS = {
+        User: '#3498db', Group: '#2ecc71', Computer: '#e67e22',
+        Domain: '#8e44ad', GPO: '#95a5a6', OU: '#7f8c8d',
+        CertTemplate: '#d35400', Container: '#7f8c8d', Unknown: '#bdc3c7'
+    };
+
+    const NODE_SHAPES = {
+        Domain: 'diamond', GPO: 'hexagon', OU: 'hexagon',
+        Computer: 'rectangle', CertTemplate: 'star'
+    };
+
+    function nodeColor(n) {
+        if (!n) return '#bdc3c7';
+        if (n.canDCSync)                       return '#c0392b';
+        if (n.isAdmin || n.props?.highvalue)   return '#f1c40f';
+        return NODE_COLORS[n.type] || '#bdc3c7';
+    }
+
+    function nodeShape(n) {
+        return NODE_SHAPES[n?.type] || 'ellipse';
+    }
+
+    function edgeColor(label, isAcl) {
+        if (['GenericAll','WriteDacl','WriteOwner','AddKeyCredentialLink'].includes(label)) return '#e74c3c';
+        if (['AdminTo','CanRDP','ExecuteDCOM','CanPSRemote','SQLAdmin'].includes(label))   return '#e67e22';
+        if (['GetChangesAll','AllExtendedRights'].includes(label))                         return '#c0392b';
+        if (label === 'MemberOf')                                                          return '#4a5568';
+        if (label === 'HasSession')                                                        return '#2980b9';
+        if (isAcl)                                                                         return '#f39c12';
+        return '#6b7280';
+    }
+
+    function nodeLabel(id) {
+        const n = adNodes[id];
+        if (!n) return id;
+        const mode = document.getElementById('labelMode')?.value || 'short';
+        if (mode === 'full')  return n.name;
+        if (mode === 'type')  return `[${n.type}]`;
+        return n.name.split('@')[0].split('\\').pop();
+    }
+
+    function getLayoutConfig() {
+        const sel = document.getElementById('layoutSel')?.value || 'dagre';
+        const configs = {
+            dagre:        { name: 'dagre',        rankDir: 'LR', nodeSep: 50, rankSep: 130, padding: 30, animate: false },
+            breadthfirst: { name: 'breadthfirst', directed: true, spacingFactor: 1.5, padding: 30, animate: false },
+            cose:         { name: 'cose',         idealEdgeLength: 120, nodeOverlap: 20, fit: true, padding: 30, animate: false, numIter: 1000 },
+            concentric:   { name: 'concentric',   minNodeSpacing: 60, padding: 30, animate: false, concentric: n => n.degree(), levelWidth: () => 2 },
+            grid:         { name: 'grid',          padding: 30, animate: false }
+        };
+        return configs[sel] || configs.dagre;
+    }
+
+    function buildElements(nodeIds, edges) {
+        const nodeSet = new Set(nodeIds);
+        const elements = [];
+
+        nodeIds.forEach(id => {
+            const n = adNodes[id];
+            if (!n) return;
+            const { score, flags } = calcNodeRisk(n);
+            n.riskScore = score;
+            n.riskFlags = [...new Set([...(n.riskFlags || []), ...flags])];
+            elements.push({
+                group: 'nodes',
+                data: { id, label: nodeLabel(id) }
+            });
+        });
+
+        edges.forEach((e, i) => {
+            if (!nodeSet.has(e.from) || !nodeSet.has(e.to)) return;
+            elements.push({
+                group: 'edges',
+                data: { id: `edge_${i}`, source: e.from, target: e.to, label: e.label, isAcl: e.isAcl, riskWeight: e.riskWeight }
+            });
+        });
+        return elements;
+    }
+
+    function initCytoscape(elements) {
+        if (cy) { cy.destroy(); cy = null; }
+
+        cy = cytoscape({
+            container: document.getElementById('cy'),
+            elements,
+            style: [
+                {
+                    selector: 'node',
+                    style: {
+                        'background-color':    ele => nodeColor(adNodes[ele.id()]),
+                        'shape':               ele => nodeShape(adNodes[ele.id()]),
+                        'label':               'data(label)',
+                        'color':               '#e0e0e0',
+                        'font-size':           '9px',
+                        'text-valign':         'bottom',
+                        'text-halign':         'center',
+                        'text-margin-y':       '4px',
+                        'text-background-color':   '#1e1e26',
+                        'text-background-opacity': 0.75,
+                        'text-background-padding': '2px',
+                        'width':  ele => { const n = adNodes[ele.id()]; return n?.isAdmin ? 42 : n?.riskScore >= 60 ? 34 : 26; },
+                        'height': ele => { const n = adNodes[ele.id()]; return n?.isAdmin ? 42 : n?.riskScore >= 60 ? 34 : 26; },
+                        'border-width': ele => {
+                            const n = adNodes[ele.id()];
+                            if (n?.isAdmin || n?.canDCSync) return 3;
+                            if ((n?.riskScore || 0) >= 70) return 2;
+                            return 1;
+                        },
+                        'border-color': ele => {
+                            const n = adNodes[ele.id()];
+                            if (n?.canDCSync) return '#c0392b';
+                            if (n?.isAdmin)   return '#e67e22';
+                            if ((n?.riskScore || 0) >= 70) return '#e74c3c';
+                            return '#ffffff22';
+                        },
+                        'overlay-opacity': 0
+                    }
+                },
+                {
+                    selector: 'node:selected',
+                    style: { 'border-width': 3, 'border-color': '#7289da', 'overlay-color': '#7289da', 'overlay-opacity': 0.15 }
+                },
+                {
+                    selector: 'edge',
+                    style: {
+                        'line-color':          ele => edgeColor(ele.data('label'), ele.data('isAcl')),
+                        'target-arrow-color':  ele => edgeColor(ele.data('label'), ele.data('isAcl')),
+                        'target-arrow-shape':  'triangle',
+                        'curve-style':         'bezier',
+                        'label':               'data(label)',
+                        'font-size':           '7px',
+                        'color':               '#888',
+                        'text-background-color':   '#1e1e26',
+                        'text-background-opacity': 0.75,
+                        'text-background-padding': '2px',
+                        'width': ele => { const w = ele.data('riskWeight') || 10; return w >= 80 ? 2.5 : w >= 50 ? 1.5 : 1; },
+                        'opacity': 0.75
+                    }
+                },
+                {
+                    selector: 'edge:selected',
+                    style: { 'width': 3, 'opacity': 1 }
+                }
+            ],
+            layout: getLayoutConfig(),
+            minZoom: 0.02, maxZoom: 12,
+            userZoomingEnabled: true, userPanningEnabled: true, boxSelectionEnabled: true
+        });
+
+        cy.on('tap', 'node', evt => showNodeDetails(evt.target.id()));
+        cy.on('tap', evt  => { if (evt.target === cy) resetHighlight(); });
+        document.getElementById('statusMessage').innerText = '';
+    }
+
+    function applyLayout() {
+        if (cy) cy.layout(getLayoutConfig()).run();
+    }
+
+    function resetHighlight() {
+        if (!cy) return;
+        cy.nodes().removeStyle('opacity');
+        cy.edges().removeStyle('opacity width lineColor targetArrowColor');
+    }
+
+    function resetView() {
+        if (cy) { cy.fit(); cy.center(); }
+    }
+
+    function updateLabels() {
+        if (!cy) return;
+        cy.nodes().forEach(n => n.data('label', nodeLabel(n.id())));
+    }
+
+    // ================================================================
+    // FILTER & RENDER
+    // ================================================================
+    function renderGraph() {
+        if (Object.keys(adNodes).length === 0) return;
+
+        const showMemberOf = document.getElementById('showMemberOf').checked;
+        const showAcls     = document.getElementById('showAcls').checked;
+        const showExec     = document.getElementById('showExec').checked;
+        const hideOrphans  = document.getElementById('hideOrphans').checked;
+        const qv           = document.getElementById('quickView').value;
+
+        let filteredEdges = adEdges.filter(e => {
+            if (qv.startsWith('edge_'))      return e.label === qv.replace('edge_', '');
+            if (!showMemberOf && e.label === 'MemberOf') return false;
+            if (!showAcls     && ACL_EDGES.has(e.label)) return false;
+            if (!showExec     && EXEC_EDGES.has(e.label)) return false;
+            return true;
+        });
+
+        let filteredNodeIds = Object.keys(adNodes);
+
+        if (qv.startsWith('prop_')) {
+            const prop = qv.replace('prop_', '');
+            filteredNodeIds = filteredNodeIds.filter(id => adNodes[id]?.props?.[prop] === true);
+        } else if (qv.startsWith('edge_')) {
+            const connected = new Set();
+            filteredEdges.forEach(e => { connected.add(e.from); connected.add(e.to); });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'dcsync') {
+            const dcNodes = new Set(filteredNodeIds.filter(id => adNodes[id]?.canDCSync));
+            const connected = new Set([...dcNodes]);
+            filteredEdges.forEach(e => {
+                if (dcNodes.has(e.from) || dcNodes.has(e.to)) { connected.add(e.from); connected.add(e.to); }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'highvalue') {
+            const hvNodes = new Set(filteredNodeIds.filter(id => adNodes[id]?.isAdmin || adNodes[id]?.props?.highvalue));
+            const connected = new Set([...hvNodes]);
+            filteredEdges.forEach(e => {
+                if (hvNodes.has(e.to)) { connected.add(e.from); connected.add(e.to); }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        }
+
+        const nodeSet = new Set(filteredNodeIds);
+        filteredEdges = filteredEdges.filter(e => nodeSet.has(e.from) && nodeSet.has(e.to));
+
+        if (hideOrphans && !qv.startsWith('prop_')) {
+            const connected = new Set();
+            filteredEdges.forEach(e => { connected.add(e.from); connected.add(e.to); });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id) || adNodes[id]?.isAdmin);
+            const ns2 = new Set(filteredNodeIds);
+            filteredEdges = filteredEdges.filter(e => ns2.has(e.from) && ns2.has(e.to));
+        }
+
+        const elements = buildElements(filteredNodeIds, filteredEdges);
+        initCytoscape(elements);
+    }
+
+    // ================================================================
+    // QUICK VIEW BUILDER
+    // ================================================================
+    function buildQuickViews() {
+        const select = document.getElementById('quickView');
+        select.innerHTML = '<option value="none">-- Show All --</option>';
+        const uniqueEdges = new Set(adEdges.map(e => e.label));
+        const hasNodeProp = p => Object.values(adNodes).some(n => n.props?.[p] === true);
+        const dcsyncCount = Object.values(adNodes).filter(n => n.canDCSync).length;
+
+        // Special analysis
+        const special = document.createElement('optgroup');
+        special.label = 'Special Analysis';
+        if (dcsyncCount > 0) {
+            const o = document.createElement('option');
+            o.value = 'dcsync';
+            o.textContent = `DCSync Principals (${dcsyncCount})`;
+            special.appendChild(o);
+        }
+        const hv = document.createElement('option');
+        hv.value = 'highvalue';
+        hv.textContent = 'High Value Targets + Paths';
+        special.appendChild(hv);
+        select.appendChild(special);
+
+        // Edge categories
+        const cats = {
+            'High-Risk ACLs':     ['GenericAll','WriteDacl','WriteOwner','Owns','ForceChangePassword','AddMember','ReadLAPSPassword','AddKeyCredentialLink','AllExtendedRights','GenericWrite','AddSelf'],
+            'Privilege & Exec':   ['AdminTo','CanRDP','ExecuteDCOM','CanPSRemote','SQLAdmin','HasSession','GetChangesAll','GetChanges'],
+            'Delegation & Trust': ['AllowedToDelegate','AllowedToAct','TrustedBy'],
+            'ADCS':               ['Enroll','ManageCA','ManageCertificates','CanAbuseGPO'],
+            'GPO':                ['GPLink']
+        };
+
+        const knownEdges = new Set(['MemberOf']);
+        for (const [groupName, edgeList] of Object.entries(cats)) {
+            const present = edgeList.filter(e => uniqueEdges.has(e));
+            if (!present.length) continue;
+            const og = document.createElement('optgroup');
+            og.label = groupName;
+            present.forEach(edge => {
+                const o = document.createElement('option');
+                o.value = `edge_${edge}`;
+                o.textContent = `Isolate: ${edge}`;
+                og.appendChild(o);
+                knownEdges.add(edge);
+            });
+            select.appendChild(og);
+        }
+
+        // Node property views
+        const propChecks = [
+            { prop: 'hasspn',               label: 'Kerberoastable (Has SPN)' },
+            { prop: 'dontreqpreauth',        label: 'AS-REP Roastable' },
+            { prop: 'unconstraineddelegation', label: 'Unconstrained Delegation' },
+            { prop: 'constraineddelegation', label: 'Constrained Delegation' },
+            { prop: 'pwdneverexpires',       label: 'Password Never Expires' },
+            { prop: 'admincount',            label: 'AdminCount = 1' },
+            { prop: 'sidhistory',            label: 'Has SID History' },
+            { prop: 'enabled',               label: 'Enabled Accounts' },
+        ];
+        const presentProps = propChecks.filter(c => hasNodeProp(c.prop));
+        if (presentProps.length) {
+            const og = document.createElement('optgroup');
+            og.label = 'Vulnerable Attributes';
+            presentProps.forEach(attr => {
+                const o = document.createElement('option');
+                o.value = `prop_${attr.prop}`;
+                o.textContent = `Show: ${attr.label}`;
+                og.appendChild(o);
+            });
+            select.appendChild(og);
+        }
+
+        // Unknown / dynamic edges
+        const other = [...uniqueEdges].filter(e => !knownEdges.has(e));
+        if (other.length) {
+            const og = document.createElement('optgroup');
+            og.label = 'Other Edges';
+            other.forEach(edge => {
+                const o = document.createElement('option');
+                o.value = `edge_${edge}`;
+                o.textContent = `Isolate: ${edge}`;
+                og.appendChild(o);
+            });
+            select.appendChild(og);
+        }
+    }
+
+    // ================================================================
+    // NODE DETAILS PANEL
+    // ================================================================
+    // Safe approach: store node IDs in a global array indexed by a token
+    const _nodeTokens = {};
+    let _tokenIdx = 0;
+    function nodeToken(id) {
+        const tok = `_n${_tokenIdx++}`;
+        _nodeTokens[tok] = id;
+        return tok;
+    }
+
+    function showNodeDetails(nodeId) {
+        const n = adNodes[nodeId];
+        if (!n) return;
+        switchTab('details');
+
+        const { score, flags } = calcNodeRisk(n);
+        const allFlags = [...new Set([...(n.riskFlags || []), ...flags])];
+        const rc = getRiskColor(score);
+        const nc = nodeColor(n);
+
+        let html = `<div class="mb-3">
+            <div class="font-bold text-sm text-white break-all">${esc(n.name)}</div>
+            <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
+                <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${nc}22;color:${nc};border:1px solid ${nc}55">${n.type}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold" style="color:${rc};border:1px solid ${rc}44">${getRiskLabel(score)} Risk &bull; ${score}/100</span>
+                ${n.isAdmin ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/60 text-yellow-300 border border-yellow-700">HIGH VALUE</span>' : ''}
+                ${n.canDCSync ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300 border border-red-700">DCSYNC</span>' : ''}
+            </div>
+        </div>`;
+
+        if (allFlags.length) {
+            html += `<div class="mb-3">
+                <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Risk Flags</div>
+                <div class="flex flex-wrap gap-1">
+                    ${allFlags.map(f => `<span class="px-1.5 py-0.5 bg-red-900/40 text-red-300 border border-red-800/50 rounded text-xs">${esc(f)}</span>`).join('')}
+                </div>
+            </div>`;
+        }
+
+        const p = n.props || {};
+        const propDefs = [
+            ['SID',          p.objectsid || p.domainsid],
+            ['Domain',       p.domain],
+            ['DN',           p.distinguishedname],
+            ['Enabled',      p.enabled != null ? String(p.enabled) : null],
+            ['OS',           p.operatingsystem],
+            ['OS SP',        p.operatingsystemservicepack],
+            ['Last Logon',   p.lastlogon    ? tsDate(p.lastlogon)    : null],
+            ['Pwd Last Set', p.pwdlastset   ? tsDate(p.pwdlastset)   : null],
+            ['Created',      p.whencreated  ? tsDate(p.whencreated)  : null],
+            ['Description',  p.description],
+            ['Email',        p.email],
+            ['Title',        p.title],
+            ['Department',   p.department],
+        ].filter(([,v]) => v != null && v !== '');
+
+        if (propDefs.length) {
+            html += `<div class="mb-3">
+                <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Properties</div>
+                <table class="w-full text-xs border-collapse">
+                    ${propDefs.map(([k,v]) =>
+                        `<tr class="border-b border-gray-800/50">
+                            <td class="py-0.5 pr-2 text-gray-500 w-1/3 align-top">${k}</td>
+                            <td class="py-0.5 text-gray-200 break-all">${esc(String(v))}</td>
+                        </tr>`
+                    ).join('')}
+                </table>
+            </div>`;
+        }
+
+        if (p.serviceprincipalnames?.length) {
+            html += `<div class="mb-3">
+                <div class="text-yellow-400 font-semibold mb-1 text-xs uppercase tracking-wide">SPNs (${p.serviceprincipalnames.length})</div>
+                ${p.serviceprincipalnames.map(s => `<div class="text-gray-300 font-mono text-xs break-all py-0.5">${esc(s)}</div>`).join('')}
+            </div>`;
+        }
+
+        if (p.sidhistory?.length) {
+            html += `<div class="mb-3">
+                <div class="text-orange-400 font-semibold mb-1 text-xs uppercase tracking-wide">SID History (${p.sidhistory.length})</div>
+                ${p.sidhistory.map(s => `<div class="text-gray-300 font-mono text-xs py-0.5">${esc(s)}</div>`).join('')}
+            </div>`;
+        }
+
+        const outEdges = adEdges.filter(e => e.from === nodeId);
+        const inEdges  = adEdges.filter(e => e.to   === nodeId);
+
+        html += renderEdgeSection('Outgoing', outEdges, nodeId, true);
+        html += renderEdgeSection('Incoming', inEdges,  nodeId, false);
+
+        document.getElementById('pane-details').innerHTML = html;
+
+        // Dim everything except neighborhood
+        if (cy) {
+            const el = cy.getElementById(nodeId);
+            if (el.length) {
+                cy.nodes().style({ opacity: 0.15 });
+                cy.edges().style({ opacity: 0.04 });
+                el.closedNeighborhood().style({ opacity: 1 });
+                el.connectedEdges().style({ opacity: 0.8 });
+            }
+        }
+    }
+
+    function renderEdgeSection(title, edges, selfId, isOut) {
+        if (!edges.length) return '';
+        const MAX = 25;
+        const shown = edges.slice(0, MAX);
+        return `<div class="mb-3">
+            <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">${title} (${edges.length})</div>
+            ${shown.map(e => {
+                const otherId = isOut ? e.to : e.from;
+                const other   = adNodes[otherId];
+                const shortName = (other?.name || otherId).split('@')[0].split('\\').pop();
+                const ec = edgeColor(e.label, e.isAcl);
+                const tok = nodeToken(otherId);
+                return `<div class="flex items-center gap-1.5 py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
+                             onclick="showNodeDetails(_nodeTokens['${tok}'])">
+                    <span class="shrink-0 font-mono text-xs px-1.5 py-0 rounded" style="color:${ec};border:1px solid ${ec}44;white-space:nowrap">${esc(e.label)}</span>
+                    <span class="text-gray-300 text-xs truncate">${esc(shortName)}</span>
+                    ${other?.isAdmin ? '<span class="text-yellow-400 text-xs shrink-0">&#9733;</span>' : ''}
+                </div>`;
+            }).join('')}
+            ${edges.length > MAX ? `<div class="text-gray-600 text-xs pl-1">...and ${edges.length - MAX} more</div>` : ''}
+        </div>`;
+    }
+
+    function tsDate(ts) {
+        if (!ts || ts <= 0) return null;
+        try { return new Date(ts * 1000).toLocaleDateString(); } catch { return null; }
+    }
+
+    // ================================================================
+    // ATTACK PATHS PANEL
+    // ================================================================
+    function renderPathsPanel() {
+        const pane = document.getElementById('pane-paths');
+        if (!foundPaths.length) {
+            pane.innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">No paths found</div>';
+            return;
+        }
+
+        let html = `<div class="text-gray-400 text-xs mb-2 font-semibold">${foundPaths.length} path(s) to high-value targets</div>`;
+
+        foundPaths.slice(0, 75).forEach((p, i) => {
+            const color = p.hops <= 2 ? '#e74c3c' : p.hops <= 4 ? '#e67e22' : '#f1c40f';
+            const label = p.hops <= 2 ? 'Critical' : p.hops <= 4 ? 'High' : 'Medium';
+            const startShort = p.path[0].split('@')[0];
+            const endShort   = p.path[p.path.length-1].split('@')[0];
+            const pathStr    = p.path.map(n => n.split('@')[0]).join(' → ');
+            html += `<div class="mb-2 p-2 bg-gray-800/70 rounded border border-gray-700/60 hover:border-gray-500/60 cursor-pointer"
+                          onclick="highlightPath(foundPaths[${i}].path)">
+                <div class="flex items-center justify-between mb-0.5">
+                    <span class="font-semibold text-xs truncate text-gray-200">${esc(startShort)} → ${esc(endShort)}</span>
+                    <span class="text-xs px-1.5 py-0 rounded ml-2 shrink-0" style="color:${color};border:1px solid ${color}44">${label} (${p.hops} hops)</span>
+                </div>
+                <div class="text-gray-600 text-xs truncate">${esc(pathStr)}</div>
+            </div>`;
+        });
+
+        if (foundPaths.length > 75) {
+            html += `<div class="text-gray-600 text-xs text-center py-2">...and ${foundPaths.length - 75} more</div>`;
+        }
+        pane.innerHTML = html;
+    }
+
+    // ================================================================
+    // RISK REPORT PANEL
+    // ================================================================
+    function renderRiskReport() {
+        const vals = Object.values(adNodes);
+
+        const kerberoastable = vals.filter(n => n.props?.hasspn          && n.props?.enabled !== false);
+        const asrep          = vals.filter(n => n.props?.dontreqpreauth  && n.props?.enabled !== false);
+        const unconstrained  = vals.filter(n => n.props?.unconstraineddelegation);
+        const dcsync         = vals.filter(n => n.canDCSync);
+        const sidHistory     = vals.filter(n => n.props?.sidhistory?.length > 0);
+        const critAcls       = adEdges.filter(e => ['GenericAll','WriteDacl','WriteOwner'].includes(e.label));
+
+        const highRisk = vals
+            .map(n => ({ n, r: calcNodeRisk(n) }))
+            .filter(({ r }) => r.score >= 40)
+            .sort((a, b) => b.r.score - a.r.score)
+            .slice(0, 25);
+
+        const section = (title, color, items, renderFn) => {
+            if (!items.length) return '';
+            return `<div class="mb-4">
+                <div class="font-semibold text-xs mb-1.5 uppercase tracking-wide" style="color:${color}">${title} (${items.length})</div>
+                ${items.slice(0, 12).map(renderFn).join('')}
+                ${items.length > 12 ? `<div class="text-gray-600 text-xs">...and ${items.length - 12} more</div>` : ''}
+            </div>`;
+        };
+
+        const nodeRow = n => {
+            const tok = nodeToken(n.name);
+            return `<div class="py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer text-gray-300 text-xs node-link truncate"
+                         onclick="showNodeDetails(_nodeTokens['${tok}'])">${esc(n.name.split('@')[0])}</div>`;
+        };
+
+        let html = `<div class="font-bold text-sm text-white mb-3">Attack Surface Report</div>`;
+
+        html += section('DCSync Principals', '#e74c3c', dcsync, nodeRow);
+        html += section('Critical ACLs (GenericAll/WriteDacl/WriteOwner)', '#e74c3c', critAcls, e =>
+            `<div class="text-xs py-0.5 px-1 text-gray-300">${esc(e.from.split('@')[0])} <span class="text-red-400">${esc(e.label)}</span> &#8594; ${esc(e.to.split('@')[0])}</div>`
+        );
+        html += section('Kerberoastable Accounts', '#e67e22', kerberoastable, nodeRow);
+        html += section('AS-REP Roastable Accounts', '#e67e22', asrep, nodeRow);
+        html += section('Unconstrained Delegation', '#f1c40f', unconstrained, nodeRow);
+        html += section('SID History Present', '#f1c40f', sidHistory, nodeRow);
+
+        if (highRisk.length) {
+            html += `<div class="mb-4">
+                <div class="font-semibold text-xs mb-1.5 text-orange-400 uppercase tracking-wide">Top High-Risk Nodes</div>
+                ${highRisk.map(({ n, r }) => {
+                    const tok = nodeToken(n.name);
+                    return `<div class="flex items-center justify-between py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
+                                 onclick="showNodeDetails(_nodeTokens['${tok}'])">
+                        <span class="text-gray-300 text-xs truncate">${esc(n.name.split('@')[0])}</span>
+                        <span class="text-xs ml-2 shrink-0 font-mono" style="color:${getRiskColor(r.score)}">${r.score}</span>
+                    </div>`;
+                }).join('')}
+            </div>`;
+        }
+
+        document.getElementById('pane-stats').innerHTML = html;
+    }
+
+    // ================================================================
+    // UI HELPERS
+    // ================================================================
+    function switchTab(tab) {
+        ['details','paths','stats'].forEach(t => {
+            document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
+            document.getElementById(`pane-${t}`).classList.toggle('hidden', t !== tab);
+        });
+    }
+
+    function handleSearchInput() {
+        const q   = document.getElementById('searchInput').value.toUpperCase().trim();
+        const box = document.getElementById('searchSuggestions');
+        if (!q || !Object.keys(adNodes).length) { box.classList.add('hidden'); return; }
+        const matches = Object.keys(adNodes).filter(n => n.includes(q)).slice(0, 15);
+        if (!matches.length) { box.classList.add('hidden'); return; }
+        box.innerHTML = matches.map(m => {
+            const tok = nodeToken(m);
+            return `<li class="px-3 py-1.5 hover:bg-accent cursor-pointer border-b border-gray-700/50 last:border-0 truncate text-gray-200 text-xs"
+                        onclick="
+                            document.getElementById('searchInput').value = _nodeTokens['${tok}'];
+                            document.getElementById('searchSuggestions').classList.add('hidden');
+                            findPathToDA();">
+                ${esc(m)}
+            </li>`;
+        }).join('');
+        box.classList.remove('hidden');
+    }
+
+    document.addEventListener('click', e => {
+        const si = document.getElementById('searchInput');
+        const sb = document.getElementById('searchSuggestions');
+        if (si && sb && e.target !== si && !sb.contains(e.target)) sb.classList.add('hidden');
+    });
+
+    function esc(str) {
+        return String(str || '')
+            .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function exportPNG() {
+        if (!cy) { alert('No graph to export'); return; }
+        const dataUrl = cy.png({ scale: 2, full: true, bg: '#1e1e26' });
+        const a = document.createElement('a');
+        a.href = dataUrl;
+        a.download = 'zhound-graph.png';
+        a.click();
+    }
+
+    function clearGraph() {
+        if (cy) { cy.destroy(); cy = null; }
+        adNodes = {}; adEdges = []; foundPaths = [];
+        document.getElementById('zipInput').value      = '';
+        document.getElementById('searchInput').value   = '';
+        document.getElementById('quickView').innerHTML = '<option value="none">-- Show All --</option>';
+        document.getElementById('statsBar').classList.add('hidden');
+        document.getElementById('statusMessage').innerText = 'Upload a SharpHound ZIP or JSON file to begin';
+        document.getElementById('pane-details').innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">Click any node to inspect it</div>';
+        document.getElementById('pane-paths').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Use "Find DA Path" or "All Paths" above</div>';
+        document.getElementById('pane-stats').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Upload data to see risk report</div>';
+    }
+
+    // ================================================================
+    // FILE UPLOAD
+    // ================================================================
+    document.getElementById('zipInput').addEventListener('change', async function(e) {
+        const files = Array.from(e.target.files);
+        if (!files.length) return;
+
+        adNodes = {}; adEdges = []; foundPaths = [];
+        document.getElementById('statusMessage').innerText = 'Parsing files...';
+        if (cy) { cy.destroy(); cy = null; }
+
+        try {
+            for (const file of files) {
+                if (file.name.endsWith('.json')) {
+                    const text = await file.text();
+                    try { parseFile(JSON.parse(text), file.name); }
+                    catch (err) { console.warn(`Bad JSON ${file.name}:`, err.message); }
+                } else if (file.name.endsWith('.zip')) {
+                    const zip = await JSZip.loadAsync(file);
+                    for (const [filename, fileData] of Object.entries(zip.files)) {
+                        if (!filename.endsWith('.json')) continue;
+                        try {
+                            const content = await fileData.async('string');
+                            parseFile(JSON.parse(content), filename);
+                        } catch (err) {
+                            console.warn(`Skipping ${filename}:`, err.message);
+                        }
+                    }
+                }
+            }
+
+            detectDCSync();
+            computeStats();
+            buildQuickViews();
+            renderRiskReport();
+
+            const total = Object.keys(adNodes).length;
+            document.getElementById('statusMessage').innerText =
+                `Loaded ${total} objects, ${adEdges.length} edges. Rendering...`;
+
+            setTimeout(() => renderGraph(), 80);
+
+        } catch (err) {
+            console.error(err);
+            document.getElementById('statusMessage').innerText = 'Error: ' + err.message;
+        }
+    });
+
+    // ================================================================
+    // RESIZABLE PANEL
+    // ================================================================
+    const resizer   = document.getElementById('resizer');
+    const leftPanel = document.getElementById('leftPanel');
+    let   isResizing = false;
+
+    resizer.addEventListener('mousedown', () => {
+        isResizing = true;
+        document.body.style.cursor    = 'col-resize';
+        document.body.style.userSelect = 'none';
+    });
+    document.addEventListener('mousemove', e => {
+        if (!isResizing) return;
+        const w = Math.max(180, Math.min(e.clientX, 600));
+        leftPanel.style.width = `${w}px`;
+    });
+    document.addEventListener('mouseup', () => {
+        if (!isResizing) return;
+        isResizing = false;
+        document.body.style.cursor    = '';
+        document.body.style.userSelect = '';
+        if (cy) { cy.resize(); cy.fit(); }
+    });
+    window.addEventListener('resize', () => {
+        if (cy) { cy.resize(); cy.fit(); }
+    });
+
+    // Register dagre layout
+    if (typeof cytoscapeDagre !== 'undefined') cytoscape.use(cytoscapeDagre);
+
+    </script>
+</body>
+</html>
