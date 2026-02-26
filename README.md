@@ -122,7 +122,7 @@ Unknown/new edge types are caught automatically and added to Quick Views.
 
 ## Usage
 
-1. **Open** `index.html` in any modern browser (Chrome, Firefox, Edge)
+1. **Open** `Z-Hound.html` in any modern browser (Chrome, Firefox, Edge)
 2. **Click** `Upload ZIP / JSON` and select your SharpHound collection
 3. **Explore** — the graph renders automatically
 4. **Click a node** to inspect its properties and risk flags
