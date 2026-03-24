@@ -186,6 +186,8 @@
     let adEdges  = [];   // { from, to, label, isAcl, riskWeight }
     let cy       = null;
     let foundPaths = [];
+    let loadErrors     = [];   // { filename, error, reason }
+    let unknownEdgeTypes = {}; // edgeType -> count
 
     // ================================================================
     // RISK ENGINE
@@ -257,6 +259,11 @@
     // PARSING
     // ================================================================
     function parseFile(json, filename) {
+        // Detect schema version and type from meta block (SharpHound v3/v4/v5)
+        const meta = json.meta || {};
+        // schemaVersion available for future version-specific handling
+        // const schemaVersion = meta.version || 3;
+
         // BloodHound v4/v5: graph object with nodes/edges
         if (json.graph && (json.graph.nodes || json.graph.edges || json.graph.relationships)) {
             parseV4Graph(json.graph);
@@ -272,15 +279,18 @@
         if (items.length === 0) return;
 
         const fn = filename.toLowerCase();
+        // Prefer meta.type for accurate file type detection (v5: "users", "computers", etc.)
+        const metaType = (meta.type || '').toLowerCase();
         let fileType = 'Unknown';
-        if      (fn.includes('user'))      fileType = 'User';
-        else if (fn.includes('group'))     fileType = 'Group';
-        else if (fn.includes('computer'))  fileType = 'Computer';
-        else if (fn.includes('domain'))    fileType = 'Domain';
-        else if (fn.includes('gpo'))       fileType = 'GPO';
-        else if (fn.includes('ou'))        fileType = 'OU';
-        else if (fn.includes('cert'))      fileType = 'CertTemplate';
-        else if (fn.includes('container')) fileType = 'Container';
+        if      (metaType === 'users'        || (!metaType && fn.includes('user')))      fileType = 'User';
+        else if (metaType === 'groups'       || (!metaType && fn.includes('group')))     fileType = 'Group';
+        else if (metaType === 'computers'    || (!metaType && fn.includes('computer')))  fileType = 'Computer';
+        else if (metaType === 'domains'      || (!metaType && fn.includes('domain')))    fileType = 'Domain';
+        else if (metaType === 'gpos'         || (!metaType && fn.includes('gpo')))       fileType = 'GPO';
+        else if (metaType === 'ous'          || (!metaType && fn.includes('ou')))        fileType = 'OU';
+        else if (metaType === 'certtemplates'|| (!metaType && fn.includes('cert')))      fileType = 'CertTemplate';
+        else if (metaType === 'containers'   || (!metaType && fn.includes('container'))) fileType = 'Container';
+        else if (metaType)                                                                fileType = metaType.charAt(0).toUpperCase() + metaType.slice(1);
 
         items.forEach(item => {
             const props = item.Properties || {};
@@ -321,6 +331,9 @@
                 if (!from || !to || from === to) return;
                 if (!adNodes[from]) adNodes[from] = { name: from, type: 'Unknown', isAdmin: false, props: {} };
                 if (!adNodes[to])   adNodes[to]   = { name: to,   type: 'Unknown', isAdmin: false, props: {} };
+                if (label && !(label in EDGE_RISK)) {
+                    unknownEdgeTypes[label] = (unknownEdgeTypes[label] || 0) + 1;
+                }
                 if (!adEdges.some(e => e.from === from && e.to === to && e.label === label)) {
                     adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
                 }
@@ -493,10 +506,10 @@
 
         const path = bfsPath(startNode, daSet);
         if (!path) {
-            document.getElementById('statusMessage').innerText = 'No path to DA found from ' + startNode;
+            document.getElementById('statusMessage').textContent = 'No path to DA found from ' + startNode;
             return;
         }
-        document.getElementById('statusMessage').innerText = '';
+        document.getElementById('statusMessage').textContent = '';
         foundPaths = [{ from: startNode, path, hops: path.length - 1 }];
         renderPathsPanel();
         switchTab('paths');
@@ -518,7 +531,7 @@
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
-        document.getElementById('statusMessage').innerText = '';
+        document.getElementById('statusMessage').textContent = '';
     }
 
     function highlightPath(pathNodes) {
@@ -634,7 +647,7 @@
 
     function initCytoscape(elements) {
         if (cy) { cy.destroy(); cy = null; }
-
+        try {
         cy = cytoscape({
             container: document.getElementById('cy'),
             elements,
@@ -704,7 +717,14 @@
 
         cy.on('tap', 'node', evt => showNodeDetails(evt.target.id()));
         cy.on('tap', evt  => { if (evt.target === cy) resetHighlight(); });
-        document.getElementById('statusMessage').innerText = '';
+        document.getElementById('statusMessage').textContent = '';
+        } catch (err) {
+            cy = null;
+            const total = Object.keys(adNodes).length;
+            document.getElementById('statusMessage').textContent =
+                `Graph library error: ${err.message} — ${total} nodes and ${adEdges.length} edges were loaded successfully.`;
+            console.error('Cytoscape init error:', err);
+        }
     }
 
     function applyLayout() {
@@ -900,7 +920,7 @@
         let html = `<div class="mb-3">
             <div class="font-bold text-sm text-white break-all">${esc(n.name)}</div>
             <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
-                <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${nc}22;color:${nc};border:1px solid ${nc}55">${n.type}</span>
+                <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${nc}22;color:${nc};border:1px solid ${nc}55">${esc(n.type)}</span>
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="color:${rc};border:1px solid ${rc}44">${getRiskLabel(score)} Risk &bull; ${score}/100</span>
                 ${n.isAdmin ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/60 text-yellow-300 border border-yellow-700">HIGH VALUE</span>' : ''}
                 ${n.canDCSync ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300 border border-red-700">DCSYNC</span>' : ''}
@@ -1077,7 +1097,45 @@
                          onclick="showNodeDetails(_nodeTokens['${tok}'])">${esc(n.name.split('@')[0])}</div>`;
         };
 
-        let html = `<div class="font-bold text-sm text-white mb-3">Attack Surface Report</div>`;
+        // Summary block
+        const typeCounts = {};
+        vals.forEach(n => { typeCounts[n.type] = (typeCounts[n.type] || 0) + 1; });
+        const typeOrder = ['User','Computer','Group','Domain','GPO','OU','CertTemplate','Container','Unknown'];
+
+        let html = `<div class="font-bold text-sm text-white mb-2">Attack Surface Report</div>`;
+
+        html += `<div class="mb-4 p-2 bg-gray-800/60 rounded border border-gray-700/60 text-xs">
+            <div class="text-gray-400 font-semibold uppercase tracking-wide mb-1.5">Summary</div>
+            <div class="text-gray-200 mb-1.5">
+                <span class="text-white font-bold">${Object.keys(adNodes).length}</span> nodes &nbsp;&bull;&nbsp;
+                <span class="text-white font-bold">${adEdges.length}</span> edges
+            </div>
+            <div class="flex flex-wrap gap-1">
+                ${typeOrder.filter(t => typeCounts[t]).map(t =>
+                    `<span class="px-1.5 py-0.5 rounded" style="background:${(NODE_COLORS[t]||'#bdc3c7')}22;color:${NODE_COLORS[t]||'#bdc3c7'};border:1px solid ${(NODE_COLORS[t]||'#bdc3c7')}44">${esc(t)}: ${typeCounts[t]}</span>`
+                ).join('')}
+            </div>
+        </div>`;
+
+        // Warnings and errors section
+        const hasWarnings = loadErrors.length > 0 || Object.keys(unknownEdgeTypes).length > 0;
+        if (hasWarnings) {
+            html += `<div class="mb-4">
+                <div class="text-yellow-400 font-semibold text-xs uppercase tracking-wide mb-1.5">Warnings &amp; Errors</div>`;
+            loadErrors.forEach(e => {
+                html += `<div class="text-xs py-1 px-2 mb-1 bg-red-900/20 border border-red-800/40 rounded">
+                    <span class="text-red-300 font-semibold">${esc(e.error)}</span>
+                    <span class="text-gray-400"> &mdash; </span><span class="text-gray-300">${esc(e.filename)}</span>
+                    <div class="text-gray-500 mt-0.5">${esc(e.reason)}</div>
+                </div>`;
+            });
+            Object.entries(unknownEdgeTypes).forEach(([type, count]) => {
+                html += `<div class="text-xs py-1 px-2 mb-1 bg-yellow-900/20 border border-yellow-800/40 rounded text-yellow-200">
+                    ${count} edge(s) of unknown type '<span class="font-mono">${esc(type)}</span>' included with default risk weight
+                </div>`;
+            });
+            html += `</div>`;
+        }
 
         html += section('DCSync Principals', '#e74c3c', dcsync, nodeRow);
         html += section('Critical ACLs (GenericAll/WriteDacl/WriteOwner)', '#e74c3c', critAcls, e =>
@@ -1158,11 +1216,12 @@
     function clearGraph() {
         if (cy) { cy.destroy(); cy = null; }
         adNodes = {}; adEdges = []; foundPaths = [];
+        loadErrors = []; unknownEdgeTypes = {};
         document.getElementById('zipInput').value      = '';
         document.getElementById('searchInput').value   = '';
         document.getElementById('quickView').innerHTML = '<option value="none">-- Show All --</option>';
         document.getElementById('statsBar').classList.add('hidden');
-        document.getElementById('statusMessage').innerText = 'Upload a SharpHound ZIP or JSON file to begin';
+        document.getElementById('statusMessage').textContent = 'Upload a SharpHound ZIP or JSON file to begin';
         document.getElementById('pane-details').innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">Click any node to inspect it</div>';
         document.getElementById('pane-paths').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Use "Find DA Path" or "All Paths" above</div>';
         document.getElementById('pane-stats').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Upload data to see risk report</div>';
@@ -1171,49 +1230,143 @@
     // ================================================================
     // FILE UPLOAD
     // ================================================================
+    function showLoadSummary() {
+        renderRiskReport();
+        if (loadErrors.length > 0 || Object.keys(unknownEdgeTypes).length > 0) {
+            switchTab('stats');
+        }
+    }
+
     document.getElementById('zipInput').addEventListener('change', async function(e) {
         const files = Array.from(e.target.files);
         if (!files.length) return;
 
         adNodes = {}; adEdges = []; foundPaths = [];
-        document.getElementById('statusMessage').innerText = 'Parsing files...';
+        loadErrors = []; unknownEdgeTypes = {};
         if (cy) { cy.destroy(); cy = null; }
 
-        try {
-            for (const file of files) {
-                if (file.name.endsWith('.json')) {
-                    const text = await file.text();
-                    try { parseFile(JSON.parse(text), file.name); }
-                    catch (err) { console.warn(`Bad JSON ${file.name}:`, err.message); }
-                } else if (file.name.endsWith('.zip')) {
-                    const zip = await JSZip.loadAsync(file);
-                    for (const [filename, fileData] of Object.entries(zip.files)) {
-                        if (!filename.endsWith('.json')) continue;
-                        try {
-                            const content = await fileData.async('string');
-                            parseFile(JSON.parse(content), filename);
-                        } catch (err) {
-                            console.warn(`Skipping ${filename}:`, err.message);
-                        }
-                    }
+        const MAX_UNCOMPRESSED = 500 * 1024 * 1024; // 500 MB
+        const MAX_NODES = 100000;
+        let totalUncompressed = 0;
+        let aborted = false;
+        const statusEl = document.getElementById('statusMessage');
+
+        // First pass: collect all JSON entries to parse (also validates ZIPs)
+        const filesToParse = []; // { filename, getText: async fn }
+
+        for (let fi = 0; fi < files.length && !aborted; fi++) {
+            const file = files[fi];
+            statusEl.textContent = `Reading ${file.name} (${fi + 1}/${files.length})...`;
+
+            const nameLower = file.name.toLowerCase();
+            if (nameLower.endsWith('.zip')) {
+                let zip;
+                try {
+                    zip = await JSZip.loadAsync(file);
+                } catch (err) {
+                    loadErrors.push({ filename: file.name, error: 'ZIP read error', reason: err.message });
+                    continue;
                 }
+                for (const [filename, zipEntry] of Object.entries(zip.files)) {
+                    if (!filename.toLowerCase().endsWith('.json') || zipEntry.dir) continue;
+                    const uncSize = (zipEntry._data && zipEntry._data.uncompressedSize) || 0;
+                    totalUncompressed += uncSize;
+                    if (totalUncompressed > MAX_UNCOMPRESSED) {
+                        aborted = true;
+                        const reason = 'Uncompressed content exceeds 500 MB limit. Load aborted to protect the browser.';
+                        loadErrors.push({ filename: file.name + ' / ' + filename, error: 'ZIP bomb protection', reason });
+                        statusEl.textContent = reason;
+                        break;
+                    }
+                    filesToParse.push({ filename, getText: () => zipEntry.async('string') });
+                }
+            } else if (nameLower.endsWith('.json')) {
+                totalUncompressed += file.size;
+                if (totalUncompressed > MAX_UNCOMPRESSED) {
+                    aborted = true;
+                    const reason = 'Total input size exceeds 500 MB limit. Load aborted.';
+                    loadErrors.push({ filename: file.name, error: 'Size limit exceeded', reason });
+                    statusEl.textContent = reason;
+                    break;
+                }
+                filesToParse.push({ filename: file.name, getText: () => file.text() });
+            } else {
+                loadErrors.push({ filename: file.name, error: 'Unsupported format', reason: 'Only .zip and .json files are accepted' });
+            }
+        }
+
+        if (aborted) { showLoadSummary(); return; }
+
+        // Second pass: read and parse each JSON file
+        for (let i = 0; i < filesToParse.length && !aborted; i++) {
+            const { filename, getText } = filesToParse[i];
+            statusEl.textContent = `Processing ${filename} (${i + 1}/${filesToParse.length})...`;
+
+            let text;
+            try {
+                text = await getText();
+            } catch (err) {
+                loadErrors.push({ filename, error: 'Read error', reason: err.message });
+                continue;
             }
 
-            detectDCSync();
-            computeStats();
-            buildQuickViews();
-            renderRiskReport();
+            // Strip UTF-8 BOM (U+FEFF) that SharpHound prepends to its JSON files
+            text = text.replace(/^\uFEFF/, '');
 
-            const total = Object.keys(adNodes).length;
-            document.getElementById('statusMessage').innerText =
-                `Loaded ${total} objects, ${adEdges.length} edges. Rendering...`;
+            if (!text || !text.trim()) {
+                loadErrors.push({ filename, error: 'Empty file', reason: 'File contains no data' });
+                continue;
+            }
 
-            setTimeout(() => renderGraph(), 80);
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (err) {
+                loadErrors.push({ filename, error: 'Invalid JSON', reason: err.message.slice(0, 150) });
+                continue;
+            }
 
-        } catch (err) {
-            console.error(err);
-            document.getElementById('statusMessage').innerText = 'Error: ' + err.message;
+            try {
+                parseFile(json, filename);
+            } catch (err) {
+                loadErrors.push({ filename, error: 'Parse error', reason: err.message.slice(0, 150) });
+                continue;
+            }
+
+            if (Object.keys(adNodes).length > MAX_NODES) {
+                aborted = true;
+                const reason = `Node count exceeded 100,000 after processing ${filename}. Load aborted to prevent browser hang.`;
+                loadErrors.push({ filename, error: 'Node limit exceeded', reason });
+                statusEl.textContent = reason;
+                break;
+            }
         }
+
+        if (Object.keys(adNodes).length === 0) {
+            statusEl.textContent = loadErrors.length
+                ? `No objects loaded — ${loadErrors.length} file(s) had errors. See Risk Report tab.`
+                : 'No objects found in the uploaded files.';
+            showLoadSummary();
+            return;
+        }
+
+        detectDCSync();
+        computeStats();
+        buildQuickViews();
+        renderRiskReport();
+
+        const total = Object.keys(adNodes).length;
+        const warnCount = loadErrors.length + Object.keys(unknownEdgeTypes).length;
+        statusEl.textContent = `Loaded ${total} objects, ${adEdges.length} edges.${warnCount ? ` ${warnCount} warning(s) — see Risk Report.` : ''} Rendering...`;
+
+        setTimeout(() => {
+            try {
+                renderGraph();
+            } catch (err) {
+                statusEl.textContent = `Render failed: ${err.message} — ${total} nodes and ${adEdges.length} edges were loaded.`;
+                console.error('renderGraph error:', err);
+            }
+        }, 80);
     });
 
     // ================================================================
