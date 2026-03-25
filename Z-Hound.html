@@ -48,11 +48,30 @@
         </div>
 
         <div class="flex items-center gap-2">
-            <div class="relative w-60">
-                <input type="text" id="searchInput" placeholder="Search object name..."
+            <!-- Search mode toggle -->
+            <div class="flex rounded overflow-hidden border border-gray-600 shrink-0 text-xs">
+                <button id="modeNameBtn" onclick="setSearchMode('name')"
+                    class="px-2.5 py-1.5 bg-accent text-white font-semibold transition">Name</button>
+                <button id="modeSidBtn"  onclick="setSearchMode('sid')"
+                    class="px-2.5 py-1.5 bg-gray-800 text-gray-400 hover:text-white transition">SID</button>
+            </div>
+            <select id="searchTypeFilter" onchange="handleSearchInput()"
+                class="bg-gray-800 text-white px-2 py-1.5 rounded text-xs border border-gray-600 focus:outline-none focus:border-accent shrink-0">
+                <option value="all">All Types</option>
+                <option value="User">Users</option>
+                <option value="Computer">Computers</option>
+                <option value="Group">Groups</option>
+                <option value="Domain">Domains</option>
+                <option value="OU">OUs</option>
+                <option value="GPO">GPOs</option>
+                <option value="CertTemplate">Certs</option>
+                <option value="Container">Containers</option>
+            </select>
+            <div class="relative w-56">
+                <input type="text" id="searchInput" placeholder="Search objects..."
                     class="bg-gray-800 text-white px-3 py-1.5 rounded text-xs w-full border border-gray-600 focus:outline-none focus:border-accent"
                     oninput="handleSearchInput()" onfocus="handleSearchInput()">
-                <ul id="searchSuggestions" class="absolute z-50 w-full bg-gray-700 border border-gray-600 rounded mt-1 hidden max-h-48 overflow-y-auto shadow-xl"></ul>
+                <ul id="searchSuggestions" class="absolute z-50 w-80 right-0 bg-gray-800 border border-gray-600 rounded mt-1 hidden max-h-72 overflow-y-auto shadow-xl"></ul>
             </div>
             <button onclick="findPathToDA()" class="bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded text-xs font-bold transition">&#128293; Find DA Path</button>
             <button onclick="findAllPaths()" class="bg-orange-700 hover:bg-orange-600 px-3 py-1.5 rounded text-xs font-bold transition">All Paths</button>
@@ -79,7 +98,7 @@
             <input type="checkbox" id="hideOrphans" checked class="accent-blue-600" onchange="renderGraph()"> Hide Orphans
         </label>
         <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
-            <input type="checkbox" id="showMemberOf" checked class="accent-blue-600" onchange="renderGraph()"> MemberOf
+            <input type="checkbox" id="showMemberOf" checked class="accent-blue-600" onchange="renderGraph()"> Structure
         </label>
         <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300">
             <input type="checkbox" id="showAcls" checked class="accent-blue-600" onchange="renderGraph()"> ACLs
@@ -112,6 +131,9 @@
             <option value="full">Full</option>
             <option value="type">Type Only</option>
         </select>
+        <label class="flex items-center gap-1 cursor-pointer hover:text-white text-gray-300" title="Toggle node labels between display name and SID">
+            <input type="checkbox" id="showSidLabels" class="accent-blue-600" onchange="updateLabels()"> SID
+        </label>
 
         <button onclick="resetView()" class="ml-auto bg-accent hover:bg-blue-500 text-white px-3 py-1 rounded text-xs transition">Fit View</button>
         <button onclick="resetHighlight()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs transition">Clear Highlight</button>
@@ -124,9 +146,12 @@
         <div id="leftPanel" class="bg-panel flex flex-col border-r border-gray-700 shrink-0" style="width:310px; min-width:180px; max-width:550px;">
             <!-- Tabs -->
             <div class="flex border-b border-gray-700 shrink-0">
-                <button class="tab-btn active" id="tab-details" onclick="switchTab('details')">Node Details</button>
-                <button class="tab-btn" id="tab-paths" onclick="switchTab('paths')">Attack Paths</button>
-                <button class="tab-btn" id="tab-stats" onclick="switchTab('stats')">Risk Report</button>
+                <button class="tab-btn active" id="tab-details" onclick="switchTab('details')">Details</button>
+                <button class="tab-btn" id="tab-paths"  onclick="switchTab('paths')">Paths</button>
+                <button class="tab-btn" id="tab-stats"  onclick="switchTab('stats')">Report</button>
+                <button class="tab-btn" id="tab-filter" onclick="switchTab('filter')">
+                    Filter <span id="filterBadge" class="hidden ml-1 bg-accent text-white rounded-full px-1.5 text-xs font-bold"></span>
+                </button>
             </div>
 
             <!-- Details Pane -->
@@ -142,6 +167,11 @@
             <!-- Stats Pane -->
             <div id="pane-stats" class="hidden flex-1 overflow-y-auto p-3">
                 <div class="text-gray-500 text-center text-xs mt-12">Upload data to see risk report</div>
+            </div>
+
+            <!-- Filter Pane -->
+            <div id="pane-filter" class="hidden flex-1 overflow-y-auto p-3">
+                <div class="text-gray-500 text-center text-xs mt-12">Upload data to build filters</div>
             </div>
         </div>
 
@@ -186,8 +216,17 @@
     let adEdges  = [];   // { from, to, label, isAcl, riskWeight }
     let cy       = null;
     let foundPaths = [];
+    let ownedNodes = new Set();  // nodeIds marked as compromised
     let loadErrors     = [];   // { filename, error, reason }
     let unknownEdgeTypes = {}; // edgeType -> count
+    let sidIndex       = {};   // SID (uppercase) -> node display-name key
+    let nameToSid      = {};   // node display-name key -> SID (uppercase)
+    let activeFilters  = {
+        excludeTypes:   new Set(),  // unchecked types → hidden
+        excludeDomains: new Set(),  // unchecked domain names → hidden
+        includeOUs:     new Set(),  // selected OUs → show only their direct members (empty = all)
+        includeGroups:  new Set(),  // selected groups → show only their members (empty = all)
+    };
 
     // ================================================================
     // RISK ENGINE
@@ -200,16 +239,57 @@
         CanPSRemote:50, GetChangesAll:95, GetChanges:45,
         AllowedToDelegate:70, AllowedToAct:75, ManageCA:90,
         ManageCertificates:85, Enroll:50, TrustedBy:40,
-        GPLink:30, MemberOf:10, SQLAdmin:60, HasSession:35,
-        CanAbuseGPO:65, AddSelf:70, WriteAccountRestrictions:65
+        GPLink:30, MemberOf:10, Contains:15, SQLAdmin:60, HasSession:35,
+        CanAbuseGPO:65, AddSelf:70, WriteAccountRestrictions:65,
+        WriteSPN:75, ReadGMSAPassword:85, AddAllowedToAct:80, AddMembers:75, DCSync:95
     };
 
     const HIGH_RISK_ACLS = new Set([
         'GenericAll','WriteDacl','WriteOwner','Owns',
         'ForceChangePassword','AddMember','AddKeyCredentialLink',
         'ReadLAPSPassword','AllExtendedRights','GenericWrite',
-        'WriteProperty','AddSelf','WriteAccountRestrictions'
+        'WriteProperty','AddSelf','WriteAccountRestrictions',
+        'WriteSPN','AddMembers','ReadGMSAPassword','AddAllowedToAct'
     ]);
+
+    const EDGE_DESCRIPTIONS = {
+        GenericAll:             'Full control over the object. Equivalent to all rights combined.',
+        WriteDacl:              'Can modify the DACL (permissions) of the object, granting any right.',
+        WriteOwner:             'Can take ownership of the object, then modify its DACL.',
+        Owns:                   'Owns the object. Owner can modify the DACL unconditionally.',
+        ForceChangePassword:    'Can reset the account password without knowing the current one.',
+        AddMember:              'Can add members to the group.',
+        AddMembers:             'Can add members to the group.',
+        AddSelf:                'Can add yourself to the group.',
+        AddKeyCredentialLink:   'Can add a certificate credential (shadow credential) — leads to PKINIT auth without password.',
+        ReadLAPSPassword:       'Can read the local administrator LAPS password for this computer.',
+        ReadGMSAPassword:       'Can read the Group Managed Service Account password.',
+        AllExtendedRights:      'Has all extended rights — includes DCSync on domains, ForceChangePassword on users.',
+        GenericWrite:           'Can write to non-protected attributes, including servicePrincipalName (Kerberoast), scriptPath.',
+        WriteSPN:               'Can set/modify servicePrincipalName — enables targeted Kerberoasting.',
+        WriteProperty:          'Can write to a specific property of the object.',
+        WriteAccountRestrictions: 'Can modify the msDS-AllowedToActOnBehalfOfOtherIdentity attribute — enables RBCD.',
+        AddAllowedToAct:        'Can write to msDS-AllowedToActOnBehalfOfOtherIdentity — Resource-Based Constrained Delegation.',
+        AdminTo:                'Has local administrator access to the computer.',
+        CanRDP:                 'Can initiate Remote Desktop (RDP) sessions to the computer.',
+        ExecuteDCOM:            'Can execute DCOM objects on the computer (lateral movement).',
+        CanPSRemote:            'Can open remote PowerShell sessions (WinRM) to the computer.',
+        SQLAdmin:               'Has sysadmin role on a SQL Server instance on this computer.',
+        GetChangesAll:          'Combined with GetChanges: enables DCSync — can replicate all domain secrets.',
+        GetChanges:             'Part of DCSync rights. Alone insufficient; combined with GetChangesAll enables full DCSync.',
+        DCSync:                 'Can perform DCSync and retrieve all domain credentials (BloodHound CE edge).',
+        AllowedToDelegate:      'Constrained Kerberos delegation configured — can impersonate users to this service.',
+        AllowedToAct:           'Resource-Based Constrained Delegation (RBCD) — target trusts this principal to act on behalf of users.',
+        ManageCA:               'Has Manage CA right on the Certificate Authority — can approve requests, enable templates.',
+        ManageCertificates:     'Has Manage Certificates right — can approve pending certificate requests.',
+        Enroll:                 'Can enroll in this certificate template.',
+        CanAbuseGPO:            'Can modify the GPO — will affect all objects in the linked OU/domain.',
+        TrustedBy:              'This domain is trusted by the target domain.',
+        GPLink:                 'This GPO is linked to the domain/OU and affects all objects within it.',
+        MemberOf:               'Is a member of this group.',
+        Contains:               'This OU/Container contains this object.',
+        HasSession:             'A user session was observed on this computer.',
+    };
 
     const EXEC_EDGES = new Set([
         'AdminTo','CanRDP','ExecuteDCOM','CanPSRemote',
@@ -358,16 +438,17 @@
             parseArr(item.Links,            'GPLink',            false);
             parseArr(item.AllowedToEnroll,  'Enroll',            true);
             parseArr(item.SQLAdmins,        'SQLAdmin',          true);
+            parseArr(item.ChildObjects,     'Contains',          false);
 
             // ACEs
             (item.Aces || []).forEach(ace => {
-                const pName = (ace.PrincipalName || '').toUpperCase();
-                const right = ace.RightName || '';
-                if (pName && right) {
-                    if (!adNodes[pName]) adNodes[pName] = {
-                        name: pName, type: ace.PrincipalType || 'Unknown', isAdmin: false, props: {}
+                const pId   = (ace.PrincipalSID || ace.PrincipalName || '').toUpperCase();
+                const right = ace.RightName || ace.AceType || '';
+                if (pId && right) {
+                    if (!adNodes[pId]) adNodes[pId] = {
+                        name: pId, type: ace.PrincipalType || 'Unknown', isAdmin: false, props: {}
                     };
-                    addEdge(pName, name, right, HIGH_RISK_ACLS.has(right));
+                    addEdge(pId, name, right, HIGH_RISK_ACLS.has(right));
                 }
             });
 
@@ -417,6 +498,70 @@
                 }
             }
         });
+    }
+
+    // ================================================================
+    // SID RESOLUTION
+    // ================================================================
+    function resolveEdges() {
+        // SharpHound stores relationships using SIDs but names the node by display-name.
+        // Build a SID -> display-name map, then remap every edge endpoint.
+        const sidMap = {};
+        for (const [key, node] of Object.entries(adNodes)) {
+            const sid = (node.props?.objectsid || node.props?.domainsid || '').toUpperCase();
+            if (sid && sid !== key && !sidMap[sid]) sidMap[sid] = key;
+        }
+        if (!Object.keys(sidMap).length) return;
+
+        for (const edge of adEdges) {
+            for (const side of ['from', 'to']) {
+                const resolved = sidMap[edge[side]];
+                if (!resolved) continue;
+                // Merge any ghost SID-keyed node into the real named node
+                const ghost = adNodes[edge[side]];
+                if (ghost && ghost.name === edge[side]) {
+                    const real = adNodes[resolved];
+                    if (real) {
+                        if (ghost.isAdmin)       real.isAdmin    = true;
+                        if (ghost.canDCSync)     real.canDCSync  = true;
+                        if (ghost.riskFlags?.length)
+                            real.riskFlags = [...new Set([...(real.riskFlags||[]), ...ghost.riskFlags])];
+                        delete adNodes[edge[side]];
+                    }
+                }
+                edge[side] = resolved;
+            }
+        }
+
+        // Deduplicate and drop self-loops created by remapping
+        const seen = new Set();
+        adEdges = adEdges.filter(e => {
+            if (!e.from || !e.to || e.from === e.to) return false;
+            const k = `${e.from}__${e.to}__${e.label}`;
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+        });
+    }
+
+    // ================================================================
+    // SID INDEX  (used for SID-based search)
+    // ================================================================
+    function buildSidIndex() {
+        sidIndex  = {};
+        nameToSid = {};
+        for (const [key, node] of Object.entries(adNodes)) {
+            const sid = (node.props?.objectsid || node.props?.domainsid || '').toUpperCase();
+            if (sid) {
+                sidIndex[sid]  = key;
+                nameToSid[key] = sid;
+            }
+            // Ghost/unresolved nodes: their key IS the SID (e.g. "S-1-5-21-...")
+            // Record them too so the label toggle works for every node
+            if (!sid && /^S-1-/i.test(key)) {
+                nameToSid[key] = key;
+            }
+        }
     }
 
     // ================================================================
@@ -474,20 +619,21 @@
     // ================================================================
     function bfsPath(startNode, targetSet) {
         if (!startNode || !adNodes[startNode]) return null;
-        if (targetSet.has(startNode)) return [startNode];
-        const queue   = [[startNode]];
+        if (targetSet.has(startNode)) return { nodes: [startNode], edges: [] };
+        const queue   = [{ nodes: [startNode], edges: [] }];
         const visited = new Set([startNode]);
         while (queue.length > 0) {
-            const path    = queue.shift();
-            const current = path[path.length - 1];
+            const { nodes, edges } = queue.shift();
+            const current = nodes[nodes.length - 1];
             for (const edge of adEdges) {
                 if (edge.from !== current) continue;
                 const next = edge.to;
                 if (visited.has(next)) continue;
-                const newPath = [...path, next];
-                if (targetSet.has(next)) return newPath;
+                const newNodes = [...nodes, next];
+                const newEdges = [...edges, edge.label];
+                if (targetSet.has(next)) return { nodes: newNodes, edges: newEdges };
                 visited.add(next);
-                queue.push(newPath);
+                queue.push({ nodes: newNodes, edges: newEdges });
             }
         }
         return null;
@@ -496,38 +642,35 @@
     function findPathToDA() {
         const query = document.getElementById('searchInput').value.toUpperCase().trim();
         if (!query) { alert('Enter an object name to search'); return; }
-
         const startNode = Object.keys(adNodes).find(n => n.includes(query));
         if (!startNode) { alert('No object matching: ' + query); return; }
         document.getElementById('searchInput').value = startNode;
-
         const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
         if (daSet.size === 0) { alert('No high-value / Domain Admin targets found in data'); return; }
-
-        const path = bfsPath(startNode, daSet);
-        if (!path) {
+        const result = bfsPath(startNode, daSet);
+        if (!result) {
             document.getElementById('statusMessage').textContent = 'No path to DA found from ' + startNode;
             return;
         }
         document.getElementById('statusMessage').textContent = '';
-        foundPaths = [{ from: startNode, path, hops: path.length - 1 }];
+        foundPaths = [{ from: startNode, path: result, hops: result.nodes.length - 1 }];
         renderPathsPanel();
         switchTab('paths');
-        highlightPath(path);
+        highlightPath(result.nodes);
     }
 
     function findAllPaths() {
         const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
         if (daSet.size === 0) { alert('No high-value targets found'); return; }
-
         foundPaths = [];
-        const users = Object.keys(adNodes).filter(n => adNodes[n].type === 'User' && !adNodes[n].isAdmin);
-        users.forEach(n => {
-            const path = bfsPath(n, daSet);
-            if (path) foundPaths.push({ from: n, path, hops: path.length - 1 });
+        const sources = Object.keys(adNodes).filter(n =>
+            ['User','Computer'].includes(adNodes[n].type) && !adNodes[n].isAdmin
+        );
+        sources.forEach(n => {
+            const result = bfsPath(n, daSet);
+            if (result) foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1 });
         });
         foundPaths.sort((a, b) => a.hops - b.hops);
-
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
@@ -593,6 +736,7 @@
         if (['AdminTo','CanRDP','ExecuteDCOM','CanPSRemote','SQLAdmin'].includes(label))   return '#e67e22';
         if (['GetChangesAll','AllExtendedRights'].includes(label))                         return '#c0392b';
         if (label === 'MemberOf')                                                          return '#4a5568';
+        if (label === 'Contains')                                                          return '#2c3e50';
         if (label === 'HasSession')                                                        return '#2980b9';
         if (isAcl)                                                                         return '#f39c12';
         return '#6b7280';
@@ -601,6 +745,9 @@
     function nodeLabel(id) {
         const n = adNodes[id];
         if (!n) return id;
+        if (document.getElementById('showSidLabels')?.checked) {
+            return nameToSid[id] || (n.props?.objectsid || n.props?.domainsid || id).toUpperCase();
+        }
         const mode = document.getElementById('labelMode')?.value || 'short';
         if (mode === 'full')  return n.name;
         if (mode === 'type')  return `[${n.type}]`;
@@ -716,6 +863,26 @@
         });
 
         cy.on('tap', 'node', evt => showNodeDetails(evt.target.id()));
+        cy.on('tap', 'edge', evt => {
+            const label = evt.target.data('label');
+            const src   = evt.target.data('source');
+            const tgt   = evt.target.data('target');
+            const srcName = adNodes[src]?.name.split('@')[0] || src;
+            const tgtName = adNodes[tgt]?.name.split('@')[0] || tgt;
+            const desc = EDGE_DESCRIPTIONS[label] || 'No description available.';
+            document.getElementById('pane-details').innerHTML =
+                `<div class="p-3">
+                    <div class="text-gray-400 text-xs uppercase tracking-wide font-semibold mb-2">Edge Details</div>
+                    <div class="mb-2">
+                        <span class="text-gray-300 text-xs">${esc(srcName)}</span>
+                        <span class="text-accent font-bold mx-2">—[${esc(label)}]→</span>
+                        <span class="text-gray-300 text-xs">${esc(tgtName)}</span>
+                    </div>
+                    <div class="p-2 bg-gray-800/60 rounded border border-gray-700/60 text-xs text-gray-300">${esc(desc)}</div>
+                    <div class="mt-2 text-gray-500 text-xs">Risk weight: ${EDGE_RISK[label] || 10}/100</div>
+                </div>`;
+            switchTab('details');
+        });
         cy.on('tap', evt  => { if (evt.target === cy) resetHighlight(); });
         document.getElementById('statusMessage').textContent = '';
         } catch (err) {
@@ -760,7 +927,7 @@
 
         let filteredEdges = adEdges.filter(e => {
             if (qv.startsWith('edge_'))      return e.label === qv.replace('edge_', '');
-            if (!showMemberOf && e.label === 'MemberOf') return false;
+            if (!showMemberOf && (e.label === 'MemberOf' || e.label === 'Contains')) return false;
             if (!showAcls     && ACL_EDGES.has(e.label)) return false;
             if (!showExec     && EXEC_EDGES.has(e.label)) return false;
             return true;
@@ -801,6 +968,44 @@
             const ns2 = new Set(filteredNodeIds);
             filteredEdges = filteredEdges.filter(e => ns2.has(e.from) && ns2.has(e.to));
         }
+
+        // ── Panel filters ──────────────────────────────────────────
+        // 1. Exclude selected types
+        if (activeFilters.excludeTypes.size > 0)
+            filteredNodeIds = filteredNodeIds.filter(id => !activeFilters.excludeTypes.has(adNodes[id]?.type));
+
+        // 2. Exclude selected domains
+        if (activeFilters.excludeDomains.size > 0)
+            filteredNodeIds = filteredNodeIds.filter(id => {
+                const dom = (adNodes[id]?.props?.domain || '').toUpperCase();
+                return !activeFilters.excludeDomains.has(dom);
+            });
+
+        // 3. Include only members of selected OUs (direct Contains edges)
+        if (activeFilters.includeOUs.size > 0) {
+            const ouMembers = new Set();
+            activeFilters.includeOUs.forEach(ouId => {
+                adEdges.filter(e => e.from === ouId && e.label === 'Contains')
+                       .forEach(e => ouMembers.add(e.to));
+                ouMembers.add(ouId); // keep the OU node itself
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => ouMembers.has(id));
+        }
+
+        // 4. Include only members of selected groups (MemberOf edges)
+        if (activeFilters.includeGroups.size > 0) {
+            const groupMembers = new Set();
+            activeFilters.includeGroups.forEach(gid => {
+                adEdges.filter(e => e.to === gid && e.label === 'MemberOf')
+                       .forEach(e => groupMembers.add(e.from));
+                groupMembers.add(gid); // keep the group node itself
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => groupMembers.has(id));
+        }
+        // ────────────────────────────────────────────────────────────
+
+        const ns3 = new Set(filteredNodeIds);
+        filteredEdges = filteredEdges.filter(e => ns3.has(e.from) && ns3.has(e.to));
 
         const elements = buildElements(filteredNodeIds, filteredEdges);
         initCytoscape(elements);
@@ -917,14 +1122,55 @@
         const rc = getRiskColor(score);
         const nc = nodeColor(n);
 
-        let html = `<div class="mb-3">
-            <div class="font-bold text-sm text-white break-all">${esc(n.name)}</div>
+        // Detect unresolved SID nodes (name IS the SID, no display name was ever resolved)
+        const isSidNode = /^S-1-/i.test(nodeId) && n.type === 'Unknown';
+        const rid = isSidNode ? nodeId.split('-').pop() : null;
+
+        let html = '';
+
+        if (isSidNode) {
+            html += `<div class="mb-3 p-2 bg-yellow-900/30 border border-yellow-700/60 rounded">
+                <div class="flex items-center gap-1.5 mb-1.5">
+                    <span class="text-yellow-400 font-bold text-xs">&#9888; Unresolved Principal</span>
+                    <span class="text-gray-500 text-xs">RID: ${esc(rid)}</span>
+                </div>
+                <div class="text-yellow-200 font-mono text-xs break-all mb-2">${esc(nodeId)}</div>
+                <div class="flex gap-1.5 flex-wrap mb-2">
+                    <button onclick="navigator.clipboard.writeText('${esc(nodeId)}')"
+                        class="bg-gray-700 hover:bg-gray-600 text-xs px-2 py-1 rounded transition">Copy SID</button>
+                    <button onclick="setSearchMode('sid'); document.getElementById('searchInput').value='${esc(nodeId)}'; handleSearchInput();"
+                        class="bg-gray-700 hover:bg-gray-600 text-xs px-2 py-1 rounded transition">Search SID</button>
+                </div>
+                <div class="text-gray-500 text-xs leading-relaxed">
+                    This principal has active relationships but its identity was not found in the
+                    uploaded data. Upload the <span class="text-gray-300">users.json</span> or
+                    <span class="text-gray-300">groups.json</span> that contains this SID to resolve it.
+                </div>
+            </div>`;
+        }
+
+        html += `<div class="mb-3">
+            <div class="font-bold text-sm text-white break-all">${esc(isSidNode ? nodeId : n.name)}</div>
             <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${nc}22;color:${nc};border:1px solid ${nc}55">${esc(n.type)}</span>
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="color:${rc};border:1px solid ${rc}44">${getRiskLabel(score)} Risk &bull; ${score}/100</span>
                 ${n.isAdmin ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/60 text-yellow-300 border border-yellow-700">HIGH VALUE</span>' : ''}
                 ${n.canDCSync ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300 border border-red-700">DCSYNC</span>' : ''}
             </div>
+        </div>`;
+
+        // Owned button + blast radius
+        const br = blastRadius(nodeId);
+        const isOwned = ownedNodes.has(nodeId);
+        html += `<div class="flex items-center gap-2 mb-3">
+            <button onclick="toggleOwned('${esc(nodeId)}')"
+                class="px-2 py-1 rounded text-xs font-bold transition ${isOwned
+                    ? 'bg-green-700 text-white hover:bg-red-700'
+                    : 'bg-gray-700 text-gray-300 hover:bg-green-800/60 hover:text-green-300'}"
+                style="${isOwned ? 'border:1px solid #00ff8866' : ''}">
+                ${isOwned ? '☠ Owned — Unmark' : '☠ Mark as Owned'}
+            </button>
+            ${br > 0 ? `<span class="text-xs text-gray-400">Blast radius: <span class="text-orange-400 font-bold">${br}</span> nodes</span>` : ''}
         </div>`;
 
         if (allFlags.length) {
@@ -981,11 +1227,48 @@
             </div>`;
         }
 
-        const outEdges = adEdges.filter(e => e.from === nodeId);
-        const inEdges  = adEdges.filter(e => e.to   === nodeId);
+        // Key relationship quick-answers
+        const adminOn   = adEdges.filter(e => e.from === nodeId && e.label === 'AdminTo');
+        const rdpOn     = adEdges.filter(e => e.from === nodeId && e.label === 'CanRDP');
+        const psOn      = adEdges.filter(e => e.from === nodeId && e.label === 'CanPSRemote');
+        const adminBy   = adEdges.filter(e => e.to   === nodeId && e.label === 'AdminTo');
+        const rdpBy     = adEdges.filter(e => e.to   === nodeId && e.label === 'CanRDP');
+        const locatedIn = adEdges.filter(e => e.to   === nodeId && e.label === 'Contains');
+        const contains  = adEdges.filter(e => e.from === nodeId && e.label === 'Contains');
+        const gpLinks   = adEdges.filter(e => e.to   === nodeId && e.label === 'GPLink');
+        const gpLinksOut= adEdges.filter(e => e.from === nodeId && e.label === 'GPLink');
 
-        html += renderEdgeSection('Outgoing', outEdges, nodeId, true);
-        html += renderEdgeSection('Incoming', inEdges,  nodeId, false);
+        if (locatedIn.length) {
+            html += `<div class="mb-3">
+                <div class="text-blue-400 font-semibold mb-1 text-xs uppercase tracking-wide">Located In</div>
+                ${locatedIn.map(e => {
+                    const tok = nodeToken(e.from);
+                    const parent = adNodes[e.from];
+                    const nc2 = NODE_COLORS[parent?.type] || '#bdc3c7';
+                    return `<div class="flex items-center gap-1.5 py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
+                                 onclick="focusNode(_nodeTokens['${tok}'])">
+                        <span class="px-1.5 py-0 rounded text-xs font-bold shrink-0" style="background:${nc2}22;color:${nc2};border:1px solid ${nc2}55">${esc(parent?.type||'?')}</span>
+                        <span class="text-blue-200 text-xs">${esc((parent?.name||e.from).split('@')[0])}</span>
+                    </div>`;
+                }).join('')}
+            </div>`;
+        }
+
+        if (adminOn.length)  html += renderEdgeSection('Local Admin On',       adminOn,    nodeId, true);
+        if (rdpOn.length)    html += renderEdgeSection('RDP Access To',         rdpOn,      nodeId, true);
+        if (psOn.length)     html += renderEdgeSection('PS-Remote To',          psOn,       nodeId, true);
+        if (adminBy.length)  html += renderEdgeSection('Local Admins (inbound)', adminBy,   nodeId, false);
+        if (rdpBy.length)    html += renderEdgeSection('RDP Users (inbound)',    rdpBy,     nodeId, false);
+        if (contains.length) html += renderEdgeSection('Contains',              contains,   nodeId, true);
+        if (gpLinksOut.length) html += renderEdgeSection('Linked GPOs',         gpLinksOut, nodeId, true);
+        if (gpLinks.length)  html += renderEdgeSection('Linked To (Domains/OUs)', gpLinks,  nodeId, false);
+
+        // Remaining edges (exclude what we already showed above)
+        const shownLabels = new Set(['AdminTo','CanRDP','CanPSRemote','Contains','GPLink']);
+        const outOther = adEdges.filter(e => e.from === nodeId && !shownLabels.has(e.label));
+        const inOther  = adEdges.filter(e => e.to   === nodeId && !shownLabels.has(e.label));
+        if (outOther.length) html += renderEdgeSection('Other Outgoing', outOther, nodeId, true);
+        if (inOther.length)  html += renderEdgeSection('Other Incoming', inOther,  nodeId, false);
 
         document.getElementById('pane-details').innerHTML = html;
 
@@ -1014,7 +1297,7 @@
                 const ec = edgeColor(e.label, e.isAcl);
                 const tok = nodeToken(otherId);
                 return `<div class="flex items-center gap-1.5 py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
-                             onclick="showNodeDetails(_nodeTokens['${tok}'])">
+                             onclick="focusNode(_nodeTokens['${tok}'])">
                     <span class="shrink-0 font-mono text-xs px-1.5 py-0 rounded" style="color:${ec};border:1px solid ${ec}44;white-space:nowrap">${esc(e.label)}</span>
                     <span class="text-gray-300 text-xs truncate">${esc(shortName)}</span>
                     ${other?.isAdmin ? '<span class="text-yellow-400 text-xs shrink-0">&#9733;</span>' : ''}
@@ -1030,37 +1313,354 @@
     }
 
     // ================================================================
+    // FILTER PANEL
+    // ================================================================
+    function updateFilterBadge() {
+        const total = activeFilters.excludeTypes.size + activeFilters.excludeDomains.size +
+                      activeFilters.includeOUs.size   + activeFilters.includeGroups.size;
+        const badge = document.getElementById('filterBadge');
+        if (!badge) return;
+        if (total > 0) { badge.textContent = total; badge.classList.remove('hidden'); }
+        else           { badge.textContent = '';    badge.classList.add('hidden'); }
+    }
+
+    function resetFilters() {
+        activeFilters = { excludeTypes: new Set(), excludeDomains: new Set(), includeOUs: new Set(), includeGroups: new Set() };
+        buildFilterPanel();
+        updateFilterBadge();
+        renderGraph();
+    }
+
+    function toggleTypeFilter(type, checked) {
+        if (!checked) activeFilters.excludeTypes.add(type);
+        else          activeFilters.excludeTypes.delete(type);
+        updateFilterBadge();
+        renderGraph();
+    }
+
+    function toggleDomainFilter(domain, checked) {
+        if (!checked) activeFilters.excludeDomains.add(domain.toUpperCase());
+        else          activeFilters.excludeDomains.delete(domain.toUpperCase());
+        updateFilterBadge();
+        renderGraph();
+    }
+
+    function toggleOUFilter(token) {
+        const id = _nodeTokens[token];
+        if (!id) return;
+        if (activeFilters.includeOUs.has(id)) activeFilters.includeOUs.delete(id);
+        else                                  activeFilters.includeOUs.add(id);
+        // Re-render the OU buttons to reflect selection state
+        document.querySelectorAll('[data-ou-token]').forEach(btn => {
+            const nid = _nodeTokens[btn.dataset.ouToken];
+            const sel = activeFilters.includeOUs.has(nid);
+            btn.style.background = sel ? '#7289da33' : '';
+            btn.style.color      = sel ? '#7289da'   : '';
+            btn.style.border     = sel ? '1px solid #7289da66' : '1px solid #374151';
+        });
+        updateFilterBadge();
+        renderGraph();
+    }
+
+    function toggleGroupFilter(token) {
+        const id = _nodeTokens[token];
+        if (!id) return;
+        if (activeFilters.includeGroups.has(id)) activeFilters.includeGroups.delete(id);
+        else                                     activeFilters.includeGroups.add(id);
+        document.querySelectorAll('[data-grp-token]').forEach(btn => {
+            const nid = _nodeTokens[btn.dataset.grpToken];
+            const sel = activeFilters.includeGroups.has(nid);
+            btn.style.background = sel ? '#2ecc7133' : '';
+            btn.style.color      = sel ? '#2ecc71'   : '';
+            btn.style.border     = sel ? '1px solid #2ecc7166' : '1px solid #374151';
+        });
+        updateFilterBadge();
+        renderGraph();
+    }
+
+    function filterGroupSearch() {
+        const q = document.getElementById('groupSearchInput')?.value.toUpperCase().trim() || '';
+        document.querySelectorAll('[data-grp-token]').forEach(btn => {
+            const nid  = _nodeTokens[btn.dataset.grpToken];
+            const name = (adNodes[nid]?.name || '').toUpperCase();
+            btn.parentElement.style.display = (!q || name.includes(q)) ? '' : 'none';
+        });
+    }
+
+    function buildFilterPanel() {
+        const pane = document.getElementById('pane-filter');
+        if (!pane) return;
+
+        const allTypes  = [...new Set(Object.values(adNodes).map(n => n.type))].sort();
+        const domains   = Object.entries(adNodes).filter(([,n]) => n.type === 'Domain');
+        const ous       = Object.entries(adNodes).filter(([,n]) => n.type === 'OU')
+                                .sort(([,a],[,b]) => a.name.localeCompare(b.name));
+        const groups    = Object.entries(adNodes).filter(([,n]) => n.type === 'Group')
+                                .sort(([,a],[,b]) => a.name.localeCompare(b.name));
+
+        const activeCount = activeFilters.excludeTypes.size + activeFilters.excludeDomains.size +
+                            activeFilters.includeOUs.size   + activeFilters.includeGroups.size;
+
+        // ── Header ──────────────────────────────────────────────────
+        let html = `<div class="flex items-center justify-between mb-3">
+            <span class="text-white font-semibold text-xs uppercase tracking-wide">Graph Filters</span>
+            <button onclick="resetFilters()" class="text-xs px-2 py-0.5 rounded bg-gray-700 hover:bg-gray-600 transition ${activeCount ? 'text-red-400' : 'text-gray-400'}">
+                ${activeCount ? `${activeCount} active · ` : ''}Reset All
+            </button>
+        </div>`;
+
+        // ── Object Types ─────────────────────────────────────────────
+        html += `<div class="mb-4">
+            <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-2">Object Types</div>
+            <div class="flex flex-wrap gap-1.5">`;
+        allTypes.forEach(t => {
+            const nc  = NODE_COLORS[t] || '#bdc3c7';
+            const chk = !activeFilters.excludeTypes.has(t) ? 'checked' : '';
+            html += `<label class="flex items-center gap-1 cursor-pointer px-2 py-0.5 rounded text-xs font-semibold"
+                         style="background:${nc}22;color:${nc};border:1px solid ${nc}44">
+                        <input type="checkbox" class="accent-blue-600" ${chk}
+                            onchange="toggleTypeFilter('${esc(t)}',this.checked)"> ${esc(t)}
+                     </label>`;
+        });
+        html += `</div></div>`;
+
+        // ── Domains ──────────────────────────────────────────────────
+        if (domains.length) {
+            html += `<div class="mb-4">
+                <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-2">Domains / Forest</div>`;
+            domains.forEach(([id, node]) => {
+                const dom = (node.props?.domain || node.name || '').toUpperCase();
+                const chk = !activeFilters.excludeDomains.has(dom) ? 'checked' : '';
+                const short = node.name.split('@')[0];
+                html += `<label class="flex items-center gap-2 py-1 px-1.5 hover:bg-gray-800/60 rounded cursor-pointer">
+                    <input type="checkbox" class="accent-purple-500" ${chk}
+                        onchange="toggleDomainFilter('${esc(dom)}',this.checked)">
+                    <span class="text-purple-300 text-xs truncate">${esc(short)}</span>
+                </label>`;
+            });
+            html += `</div>`;
+        }
+
+        // ── OUs ──────────────────────────────────────────────────────
+        if (ous.length) {
+            const hint = activeFilters.includeOUs.size
+                ? `<span class="text-accent text-xs ml-1">${activeFilters.includeOUs.size} selected</span>` : '';
+            html += `<div class="mb-4">
+                <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-1">OUs${hint}</div>
+                <div class="text-gray-600 text-xs mb-1.5">Select to show only members</div>
+                <div class="space-y-0.5 max-h-44 overflow-y-auto pr-1">`;
+            ous.forEach(([id, node]) => {
+                const tok  = nodeToken(id);
+                const sel  = activeFilters.includeOUs.has(id);
+                const short= node.name.split('@')[0];
+                const memberCount = adEdges.filter(e => e.from === id && e.label === 'Contains').length;
+                html += `<button data-ou-token="${tok}" onclick="toggleOUFilter('${tok}')"
+                    class="w-full text-left px-2 py-1 rounded text-xs flex items-center justify-between transition"
+                    style="background:${sel?'#7289da33':''};color:${sel?'#7289da':''};border:1px solid ${sel?'#7289da66':'#374151'}">
+                    <span class="truncate">${esc(short)}</span>
+                    <span class="text-gray-600 text-xs shrink-0 ml-1">${memberCount}</span>
+                </button>`;
+            });
+            html += `</div></div>`;
+        }
+
+        // ── Groups ───────────────────────────────────────────────────
+        if (groups.length) {
+            const hint = activeFilters.includeGroups.size
+                ? `<span class="text-green-400 text-xs ml-1">${activeFilters.includeGroups.size} selected</span>` : '';
+            html += `<div class="mb-4">
+                <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-1">Groups${hint}</div>
+                <div class="text-gray-600 text-xs mb-1.5">Select to show only members</div>
+                <input id="groupSearchInput" type="text" placeholder="Filter groups…" oninput="filterGroupSearch()"
+                    class="w-full bg-gray-800 text-white px-2 py-1 rounded text-xs border border-gray-700 focus:outline-none focus:border-accent mb-1.5">
+                <div class="space-y-0.5 max-h-52 overflow-y-auto pr-1">`;
+            groups.forEach(([id, node]) => {
+                const tok  = nodeToken(id);
+                const sel  = activeFilters.includeGroups.has(id);
+                const short= node.name.split('@')[0];
+                const memberCount = adEdges.filter(e => e.to === id && e.label === 'MemberOf').length;
+                html += `<div><button data-grp-token="${tok}" onclick="toggleGroupFilter('${tok}')"
+                    class="w-full text-left px-2 py-1 rounded text-xs flex items-center justify-between transition"
+                    style="background:${sel?'#2ecc7133':''};color:${sel?'#2ecc71':''};border:1px solid ${sel?'#2ecc7166':'#374151'}">
+                    <span class="truncate">${esc(short)}</span>
+                    <span class="text-gray-600 text-xs shrink-0 ml-1">${memberCount} members</span>
+                </button></div>`;
+            });
+            html += `</div></div>`;
+        }
+
+        pane.innerHTML = html;
+    }
+
+    // ================================================================
+    // OWNED NODES + BLAST RADIUS
+    // ================================================================
+    function toggleOwned(nodeId) {
+        if (ownedNodes.has(nodeId)) ownedNodes.delete(nodeId);
+        else                        ownedNodes.add(nodeId);
+        // Refresh node style in graph
+        if (cy) {
+            const el = cy.getElementById(nodeId);
+            if (el.length) {
+                el.style('border-width',  ownedNodes.has(nodeId) ? 4 : undefined);
+                el.style('border-color',  ownedNodes.has(nodeId) ? '#00ff88' : undefined);
+                el.style('border-style',  ownedNodes.has(nodeId) ? 'dashed'  : undefined);
+            }
+        }
+        showNodeDetails(nodeId); // refresh panel to update button text
+        updateOwnedBadge();
+    }
+
+    function updateOwnedBadge() {
+        const btn = document.getElementById('btnFindOwned');
+        if (btn) btn.textContent = `☠ From Owned (${ownedNodes.size})`;
+    }
+
+    function blastRadius(nodeId) {
+        const visited = new Set([nodeId]);
+        const queue   = [nodeId];
+        while (queue.length) {
+            const cur = queue.shift();
+            for (const e of adEdges) {
+                if (e.from === cur && !visited.has(e.to)) {
+                    visited.add(e.to);
+                    queue.push(e.to);
+                }
+            }
+        }
+        return visited.size - 1;
+    }
+
+    function findPathsFromOwned() {
+        if (ownedNodes.size === 0) { alert('No nodes marked as Owned. Click a node then "Mark Owned".'); return; }
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        foundPaths = [];
+        ownedNodes.forEach(n => {
+            const result = bfsPath(n, daSet);
+            if (result) foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1, fromOwned: true });
+        });
+        foundPaths.sort((a, b) => a.hops - b.hops);
+        document.getElementById('statPaths').textContent = foundPaths.length;
+        renderPathsPanel();
+        switchTab('paths');
+        document.getElementById('statusMessage').textContent = '';
+    }
+
+    function runQuery(qtype) {
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        foundPaths = [];
+
+        if (qtype === 'kerberoastable') {
+            const sources = Object.keys(adNodes).filter(n =>
+                adNodes[n].props?.hasspn && adNodes[n].props?.enabled !== false && !adNodes[n].isAdmin
+            );
+            sources.forEach(n => { const r = bfsPath(n, daSet); if (r) foundPaths.push({ from: n, path: r, hops: r.nodes.length - 1 }); });
+
+        } else if (qtype === 'asrep') {
+            const sources = Object.keys(adNodes).filter(n =>
+                adNodes[n].props?.dontreqpreauth && adNodes[n].props?.enabled !== false && !adNodes[n].isAdmin
+            );
+            sources.forEach(n => { const r = bfsPath(n, daSet); if (r) foundPaths.push({ from: n, path: r, hops: r.nodes.length - 1 }); });
+
+        } else if (qtype === 'unconstrained') {
+            const sources = Object.keys(adNodes).filter(n =>
+                adNodes[n].props?.unconstraineddelegation && !adNodes[n].isAdmin
+            );
+            sources.forEach(n => { const r = bfsPath(n, daSet); if (r) foundPaths.push({ from: n, path: r, hops: r.nodes.length - 1 }); });
+
+        } else if (qtype === 'laps') {
+            adEdges.filter(e => e.label === 'ReadLAPSPassword').forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['ReadLAPSPassword'] }, hops: 1, queryLabel: 'LAPS Reader' });
+            });
+
+        } else if (qtype === 'gmsa') {
+            adEdges.filter(e => e.label === 'ReadGMSAPassword').forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['ReadGMSAPassword'] }, hops: 1, queryLabel: 'GMSA Reader' });
+            });
+
+        } else if (qtype === 'dcsync') {
+            Object.keys(adNodes).filter(n => adNodes[n].canDCSync && !adNodes[n].isAdmin).forEach(n => {
+                foundPaths.push({ from: n, path: { nodes: [n], edges: [] }, hops: 0, queryLabel: 'DCSync Principal' });
+            });
+
+        } else if (qtype === 'writable') {
+            const writeEdges = ['GenericAll','WriteDacl','WriteOwner','GenericWrite','Owns','AddKeyCredentialLink'];
+            adEdges.filter(e => writeEdges.includes(e.label)).forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: [e.label] }, hops: 1, queryLabel: e.label });
+            });
+        }
+
+        foundPaths.sort((a, b) => a.hops - b.hops);
+        document.getElementById('statPaths').textContent = foundPaths.length;
+        renderPathsPanel();
+        switchTab('paths');
+        document.getElementById('statusMessage').textContent = '';
+    }
+
+    // ================================================================
     // ATTACK PATHS PANEL
     // ================================================================
     function renderPathsPanel() {
         const pane = document.getElementById('pane-paths');
+
+        // ── Pre-built query buttons ──────────────────────────────────
+        let html = `<div class="mb-3">
+        <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-1.5">Quick Queries</div>
+        <div class="flex flex-wrap gap-1">
+            <button onclick="runQuery('kerberoastable')" class="px-2 py-0.5 rounded text-xs bg-yellow-900/50 text-yellow-300 border border-yellow-700/50 hover:bg-yellow-800/60 transition">Kerberoastable</button>
+            <button onclick="runQuery('asrep')"          class="px-2 py-0.5 rounded text-xs bg-orange-900/50 text-orange-300 border border-orange-700/50 hover:bg-orange-800/60 transition">AS-REP</button>
+            <button onclick="runQuery('unconstrained')"  class="px-2 py-0.5 rounded text-xs bg-red-900/50 text-red-300 border border-red-700/50 hover:bg-red-800/60 transition">Unconstrained</button>
+            <button onclick="runQuery('laps')"           class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">LAPS</button>
+            <button onclick="runQuery('gmsa')"           class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">GMSA</button>
+            <button onclick="runQuery('dcsync')"         class="px-2 py-0.5 rounded text-xs bg-red-900/70 text-red-300 border border-red-600/60 hover:bg-red-800/70 transition">DCSync</button>
+            <button onclick="runQuery('writable')"       class="px-2 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 hover:bg-purple-800/60 transition">Writable ACLs</button>
+            <button onclick="findPathsFromOwned()" id="btnFindOwned"
+                class="px-2 py-0.5 rounded text-xs bg-green-900/50 text-green-300 border border-green-700/50 hover:bg-green-800/60 transition">☠ From Owned (0)</button>
+        </div>
+    </div>
+    <div class="border-t border-gray-700/60 mb-2"></div>`;
+
         if (!foundPaths.length) {
-            pane.innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">No paths found</div>';
+            html += '<div class="text-gray-500 text-center text-xs mt-8">No paths found — run a query above or use Find DA Path</div>';
+            pane.innerHTML = html;
             return;
         }
 
-        let html = `<div class="text-gray-400 text-xs mb-2 font-semibold">${foundPaths.length} path(s) to high-value targets</div>`;
+        html += `<div class="text-gray-400 text-xs mb-2 font-semibold">${foundPaths.length} result(s)</div>`;
 
-        foundPaths.slice(0, 75).forEach((p, i) => {
-            const color = p.hops <= 2 ? '#e74c3c' : p.hops <= 4 ? '#e67e22' : '#f1c40f';
-            const label = p.hops <= 2 ? 'Critical' : p.hops <= 4 ? 'High' : 'Medium';
-            const startShort = p.path[0].split('@')[0];
-            const endShort   = p.path[p.path.length-1].split('@')[0];
-            const pathStr    = p.path.map(n => n.split('@')[0]).join(' → ');
+        foundPaths.slice(0, 100).forEach((p, i) => {
+            const nodes = p.path.nodes;
+            const edges = p.path.edges;
+            const color = p.hops === 0 ? '#e74c3c' : p.hops <= 2 ? '#e74c3c' : p.hops <= 4 ? '#e67e22' : '#f1c40f';
+            const label = p.queryLabel || (p.hops === 0 ? 'Direct' : p.hops <= 2 ? 'Critical' : p.hops <= 4 ? 'High' : 'Medium');
+            const startShort = nodes[0].split('@')[0].split('\\').pop();
+            const endShort   = nodes[nodes.length - 1].split('@')[0].split('\\').pop();
+
+            // Build rich path string with edge labels
+            let chainParts = [];
+            nodes.forEach((n, idx) => {
+                chainParts.push(n.split('@')[0].split('\\').pop());
+                if (edges[idx]) chainParts.push(`—[${edges[idx]}]→`);
+            });
+            const chainStr = chainParts.join(' ');
+
+            const tok = nodeToken(nodes[0]);
             html += `<div class="mb-2 p-2 bg-gray-800/70 rounded border border-gray-700/60 hover:border-gray-500/60 cursor-pointer"
-                          onclick="highlightPath(foundPaths[${i}].path)">
+                          onclick="highlightPath(foundPaths[${i}].path.nodes)">
                 <div class="flex items-center justify-between mb-0.5">
                     <span class="font-semibold text-xs truncate text-gray-200">${esc(startShort)} → ${esc(endShort)}</span>
-                    <span class="text-xs px-1.5 py-0 rounded ml-2 shrink-0" style="color:${color};border:1px solid ${color}44">${label} (${p.hops} hops)</span>
+                    <span class="text-xs px-1.5 py-0 rounded ml-2 shrink-0" style="color:${color};border:1px solid ${color}44">${esc(label)} (${p.hops} hops)</span>
                 </div>
-                <div class="text-gray-600 text-xs truncate">${esc(pathStr)}</div>
+                <div class="text-gray-500 text-xs truncate mt-0.5" title="${esc(chainStr)}">${esc(chainStr)}</div>
+                ${p.fromOwned ? '<div class="text-green-400 text-xs mt-0.5">☠ From owned node</div>' : ''}
             </div>`;
         });
 
-        if (foundPaths.length > 75) {
-            html += `<div class="text-gray-600 text-xs text-center py-2">...and ${foundPaths.length - 75} more</div>`;
+        if (foundPaths.length > 100) {
+            html += `<div class="text-gray-600 text-xs text-center py-2">...and ${foundPaths.length - 100} more</div>`;
         }
         pane.innerHTML = html;
+        updateOwnedBadge();
     }
 
     // ================================================================
@@ -1094,7 +1694,7 @@
         const nodeRow = n => {
             const tok = nodeToken(n.name);
             return `<div class="py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer text-gray-300 text-xs node-link truncate"
-                         onclick="showNodeDetails(_nodeTokens['${tok}'])">${esc(n.name.split('@')[0])}</div>`;
+                         onclick="focusNode(_nodeTokens['${tok}'])">${esc(n.name.split('@')[0])}</div>`;
         };
 
         // Summary block
@@ -1152,7 +1752,7 @@
                 ${highRisk.map(({ n, r }) => {
                     const tok = nodeToken(n.name);
                     return `<div class="flex items-center justify-between py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
-                                 onclick="showNodeDetails(_nodeTokens['${tok}'])">
+                                 onclick="focusNode(_nodeTokens['${tok}'])">
                         <span class="text-gray-300 text-xs truncate">${esc(n.name.split('@')[0])}</span>
                         <span class="text-xs ml-2 shrink-0 font-mono" style="color:${getRiskColor(r.score)}">${r.score}</span>
                     </div>`;
@@ -1167,29 +1767,171 @@
     // UI HELPERS
     // ================================================================
     function switchTab(tab) {
-        ['details','paths','stats'].forEach(t => {
+        ['details','paths','stats','filter'].forEach(t => {
             document.getElementById(`tab-${t}`).classList.toggle('active', t === tab);
             document.getElementById(`pane-${t}`).classList.toggle('hidden', t !== tab);
         });
+    }
+
+    let _searchMode = 'name'; // 'name' | 'sid'
+
+    function setSearchMode(mode) {
+        _searchMode = mode;
+        const nameBtn   = document.getElementById('modeNameBtn');
+        const sidBtn    = document.getElementById('modeSidBtn');
+        const typeFilter= document.getElementById('searchTypeFilter');
+        const input     = document.getElementById('searchInput');
+        if (mode === 'sid') {
+            nameBtn.classList.replace('bg-accent','bg-gray-800');
+            nameBtn.classList.replace('text-white','text-gray-400');
+            sidBtn.classList.replace('bg-gray-800','bg-accent');
+            sidBtn.classList.replace('text-gray-400','text-white');
+            typeFilter.style.display = 'none';
+            input.placeholder = 'Paste SID (S-1-5-21-…)';
+        } else {
+            sidBtn.classList.replace('bg-accent','bg-gray-800');
+            sidBtn.classList.replace('text-white','text-gray-400');
+            nameBtn.classList.replace('bg-gray-800','bg-accent');
+            nameBtn.classList.replace('text-gray-400','text-white');
+            typeFilter.style.display = '';
+            input.placeholder = 'Search objects…';
+        }
+        document.getElementById('searchInput').value = '';
+        document.getElementById('searchSuggestions').classList.add('hidden');
     }
 
     function handleSearchInput() {
         const q   = document.getElementById('searchInput').value.toUpperCase().trim();
         const box = document.getElementById('searchSuggestions');
         if (!q || !Object.keys(adNodes).length) { box.classList.add('hidden'); return; }
-        const matches = Object.keys(adNodes).filter(n => n.includes(q)).slice(0, 15);
+
+        box.textContent = ''; // clear safely
+
+        if (_searchMode === 'sid') {
+            // Search the SID index
+            const sidEntries = Object.entries(sidIndex).filter(([sid]) => sid.includes(q)).slice(0, 20);
+            if (!sidEntries.length) { box.classList.add('hidden'); return; }
+
+            sidEntries.forEach(([sid, nodeKey]) => {
+                const n  = adNodes[nodeKey];
+                const nc = NODE_COLORS[n?.type] || '#bdc3c7';
+                const tok = nodeToken(nodeKey);
+
+                const li = document.createElement('li');
+                li.className = 'px-2 py-2 hover:bg-gray-700 cursor-pointer border-b border-gray-700/30 last:border-0';
+                li.addEventListener('click', () => {
+                    document.getElementById('searchInput').value = sid;
+                    box.classList.add('hidden');
+                    focusNode(_nodeTokens[tok]);
+                });
+
+                // SID line
+                const sidEl = document.createElement('div');
+                sidEl.className = 'text-gray-400 font-mono text-xs mb-0.5';
+                sidEl.textContent = sid;
+
+                // Name + type badge row
+                const nameRow = document.createElement('div');
+                nameRow.className = 'flex items-center gap-1.5';
+
+                const badge = document.createElement('span');
+                badge.className = 'px-1.5 py-0 rounded text-xs font-bold shrink-0';
+                badge.style.cssText = `background:${nc}22;color:${nc};border:1px solid ${nc}55`;
+                badge.textContent = (n?.type || 'UNK').slice(0, 3).toUpperCase();
+
+                const nameSpan = document.createElement('span');
+                nameSpan.className = 'text-white text-xs font-semibold truncate';
+                nameSpan.textContent = nodeKey;
+
+                nameRow.appendChild(badge);
+                nameRow.appendChild(nameSpan);
+                li.appendChild(sidEl);
+                li.appendChild(nameRow);
+                box.appendChild(li);
+            });
+            box.classList.remove('hidden');
+            return;
+        }
+
+        // Name mode
+        const typeFilter = document.getElementById('searchTypeFilter')?.value || 'all';
+        let matches = Object.keys(adNodes).filter(n => n.includes(q));
+        if (typeFilter !== 'all') matches = matches.filter(n => adNodes[n]?.type === typeFilter);
+        matches = matches.slice(0, 20);
         if (!matches.length) { box.classList.add('hidden'); return; }
-        box.innerHTML = matches.map(m => {
+
+        matches.forEach(m => {
+            const n   = adNodes[m];
             const tok = nodeToken(m);
-            return `<li class="px-3 py-1.5 hover:bg-accent cursor-pointer border-b border-gray-700/50 last:border-0 truncate text-gray-200 text-xs"
-                        onclick="
-                            document.getElementById('searchInput').value = _nodeTokens['${tok}'];
-                            document.getElementById('searchSuggestions').classList.add('hidden');
-                            findPathToDA();">
-                ${esc(m)}
-            </li>`;
-        }).join('');
+            const nc  = NODE_COLORS[n?.type] || '#bdc3c7';
+            const sid = (n?.props?.objectsid || n?.props?.domainsid || '').toUpperCase();
+
+            const li = document.createElement('li');
+            li.className = 'px-2 py-1.5 hover:bg-gray-700 cursor-pointer border-b border-gray-700/30 last:border-0 flex items-center gap-2';
+            li.addEventListener('click', () => {
+                document.getElementById('searchInput').value = _nodeTokens[tok];
+                box.classList.add('hidden');
+                focusNode(_nodeTokens[tok]);
+            });
+
+            const badge = document.createElement('span');
+            badge.className = 'px-1.5 py-0 rounded text-xs font-bold shrink-0';
+            badge.style.cssText = `background:${nc}22;color:${nc};border:1px solid ${nc}55`;
+            badge.textContent = (n?.type || 'UNK').slice(0, 3).toUpperCase();
+
+            const nameEl = document.createElement('span');
+            nameEl.className = 'text-gray-200 text-xs truncate flex-1';
+            nameEl.textContent = m;
+
+            li.appendChild(badge);
+            li.appendChild(nameEl);
+
+            // Hint: relationship counts + SID snippet
+            const hints = [];
+            const outAdmin = adEdges.filter(e => e.from === m && e.label === 'AdminTo').length;
+            const inAdmin  = adEdges.filter(e => e.to   === m && e.label === 'AdminTo').length;
+            const inRDP    = adEdges.filter(e => e.to   === m && e.label === 'CanRDP').length;
+            if (outAdmin) hints.push(`admin on ${outAdmin}`);
+            if (inAdmin)  hints.push(`${inAdmin} admins`);
+            if (inRDP)    hints.push(`${inRDP} RDP`);
+
+            if (hints.length) {
+                const hint = document.createElement('span');
+                hint.className = 'text-gray-500 text-xs shrink-0';
+                hint.textContent = hints.join(' · ');
+                li.appendChild(hint);
+            }
+
+            // Show SID snippet as a second line if available
+            if (sid) {
+                const sidEl = document.createElement('div');
+                sidEl.className = 'text-gray-600 font-mono text-xs mt-0.5 pl-0.5 truncate';
+                sidEl.textContent = sid;
+                // Wrap the whole thing in a block container
+                li.style.flexDirection = 'column';
+                li.style.alignItems    = 'flex-start';
+                const topRow = document.createElement('div');
+                topRow.className = 'flex items-center gap-2 w-full';
+                // Move existing children into topRow
+                while (li.firstChild) topRow.appendChild(li.firstChild);
+                li.appendChild(topRow);
+                li.appendChild(sidEl);
+            }
+
+            box.appendChild(li);
+        });
         box.classList.remove('hidden');
+    }
+
+    function focusNode(nodeId) {
+        if (!nodeId || !adNodes[nodeId]) return;
+        showNodeDetails(nodeId);
+        if (cy) {
+            const el = cy.getElementById(nodeId);
+            if (el.length) {
+                cy.animate({ center: { eles: el }, zoom: Math.max(cy.zoom(), 1.5) }, { duration: 300 });
+            }
+        }
     }
 
     document.addEventListener('click', e => {
@@ -1215,8 +1957,9 @@
 
     function clearGraph() {
         if (cy) { cy.destroy(); cy = null; }
-        adNodes = {}; adEdges = []; foundPaths = [];
-        loadErrors = []; unknownEdgeTypes = {};
+        adNodes = {}; adEdges = []; foundPaths = []; ownedNodes = new Set();
+        loadErrors = []; unknownEdgeTypes = {}; sidIndex = {}; nameToSid = {};
+        activeFilters = { excludeTypes: new Set(), excludeDomains: new Set(), includeOUs: new Set(), includeGroups: new Set() };
         document.getElementById('zipInput').value      = '';
         document.getElementById('searchInput').value   = '';
         document.getElementById('quickView').innerHTML = '<option value="none">-- Show All --</option>';
@@ -1350,9 +2093,12 @@
             return;
         }
 
+        resolveEdges();
+        buildSidIndex();
         detectDCSync();
         computeStats();
         buildQuickViews();
+        buildFilterPanel();
         renderRiskReport();
 
         const total = Object.keys(adNodes).length;
