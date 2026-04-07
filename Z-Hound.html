@@ -45,6 +45,7 @@
 
             <button onclick="clearGraph()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Clear</button>
             <button onclick="exportPNG()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export PNG</button>
+            <button onclick="exportCSV()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export CSV</button>
         </div>
 
         <div class="flex items-center gap-2">
@@ -86,6 +87,8 @@
         <span class="text-orange-400">AS-REP Roastable: <span id="statAsrep" class="font-bold">0</span></span>
         <span class="text-red-400">DCSync Risk: <span id="statDcsync" class="font-bold">0</span></span>
         <span class="text-red-300">Critical ACLs: <span id="statAcls" class="font-bold">0</span></span>
+        <span class="text-purple-400">Unconstrained Deleg: <span id="statUnconstrained" class="font-bold">0</span></span>
+        <span class="text-orange-300">Cert Templates: <span id="statCerts" class="font-bold">0</span></span>
         <span class="text-pink-400">Paths to DA: <span id="statPaths" class="font-bold">-</span></span>
         <button onclick="findAllPaths(); switchTab('paths')" class="ml-auto text-xs text-gray-400 hover:text-white underline">Enumerate all paths</button>
     </div>
@@ -197,6 +200,10 @@
                 <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#d35400]"></span>Cert</div>
                 <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-sm inline-block bg-[#f1c40f] border border-[#e67e22]"></span>High Value</div>
                 <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>DCSync</div>
+                <div class="flex items-center gap-1.5 mt-1 border-t border-gray-700/50 pt-1"><span class="text-gray-500 text-xs">Azure:</span></div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#0078d4]"></span>AZ User</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#00b4de]"></span>AZ Group</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block bg-[#e74c3c]"></span>AZ VM</div>
             </div>
 
             <!-- Zoom Controls -->
@@ -221,6 +228,7 @@
     let unknownEdgeTypes = {}; // edgeType -> count
     let sidIndex       = {};   // SID (uppercase) -> node display-name key
     let nameToSid      = {};   // node display-name key -> SID (uppercase)
+    let gpoNames = {};  // GUID (upper, with braces) -> friendly name
     let activeFilters  = {
         excludeTypes:   new Set(),  // unchecked types → hidden
         excludeDomains: new Set(),  // unchecked domain names → hidden
@@ -241,7 +249,21 @@
         ManageCertificates:85, Enroll:50, TrustedBy:40,
         GPLink:30, MemberOf:10, Contains:15, SQLAdmin:60, HasSession:35,
         CanAbuseGPO:65, AddSelf:70, WriteAccountRestrictions:65,
-        WriteSPN:75, ReadGMSAPassword:85, AddAllowedToAct:80, AddMembers:75, DCSync:95
+        WriteSPN:75, ReadGMSAPassword:85, AddAllowedToAct:80, AddMembers:75, DCSync:95,
+        // ADCS ESC edges
+        ADCSESC1:90, ADCSESC3:85, ADCSESC4:90, ADCSESC5:85, ADCSESC6:90,
+        ADCSESC7:85, ADCSESC8:90, ADCSESC9:80, ADCSESC10:80,
+        ADCSESC13:75, SyncLAPSPassword:80, WriteGPLink:70, CoerceToTGT:85,
+        // Azure edges
+        AZAddMembers:75, AZAddOwner:80, AZAddSecret:85, AZAvereContributor:70,
+        AZContributor:70, AZExecuteCommand:85, AZGetCertificates:75,
+        AZGetKeys:80, AZGetSecrets:80, AZGlobalAdmin:95, AZGrantAppRoles:85,
+        AZHasRole:60, AZMGAddMember:80, AZMGAddOwner:80, AZMGAddSecret:85,
+        AZMGGrantAppRoles:85, AZMGGrantRole:85, AZOwns:85,
+        AZPrivilegedRoleAdmin:90, AZResetPassword:80, AZUserAccessAdmin:85,
+        AZVMAdminLogin:80, AZVMContributor:70,
+        // Misc CE edges
+        SyncedToEntraUser:40, HostsCAService:60
     };
 
     const HIGH_RISK_ACLS = new Set([
@@ -249,7 +271,10 @@
         'ForceChangePassword','AddMember','AddKeyCredentialLink',
         'ReadLAPSPassword','AllExtendedRights','GenericWrite',
         'WriteProperty','AddSelf','WriteAccountRestrictions',
-        'WriteSPN','AddMembers','ReadGMSAPassword','AddAllowedToAct'
+        'WriteSPN','AddMembers','ReadGMSAPassword','AddAllowedToAct',
+        'ADCSESC1','ADCSESC3','ADCSESC4','ADCSESC6','ADCSESC8',
+        'AZGlobalAdmin','AZPrivilegedRoleAdmin','AZResetPassword',
+        'AZAddSecret','AZGetSecrets','AZGetKeys','WriteGPLink','CoerceToTGT','SyncLAPSPassword'
     ]);
 
     const EDGE_DESCRIPTIONS = {
@@ -289,6 +314,83 @@
         MemberOf:               'Is a member of this group.',
         Contains:               'This OU/Container contains this object.',
         HasSession:             'A user session was observed on this computer.',
+        ADCSESC1:       'ESC1: User-supplied SAN in certificate request → impersonate any AD principal including Domain Admins.',
+        ADCSESC3:       'ESC3: Certificate template allows enrollment agent requests → enroll certs on behalf of other users.',
+        ADCSESC4:       'ESC4: Write access to a certificate template → modify to enable ESC1-style attack.',
+        ADCSESC5:       'ESC5: Weak PKI object ACLs (CA server, enrollment service) → can configure malicious templates.',
+        ADCSESC6:       'ESC6: CA has EDITF_ATTRIBUTESUBJECTALTNAME2 flag → attacker-supplied SAN in any request.',
+        ADCSESC7:       'ESC7: ManageCA right → can approve failed requests or set arbitrary flags.',
+        ADCSESC8:       'ESC8: NTLM relay to AD CS HTTP enrollment → obtain cert for any machine account.',
+        ADCSESC9:       'ESC9: No-security-extension on template + GenericWrite → shadow credential attack variant.',
+        ADCSESC10:      'ESC10: Weak certificate mapping on DC → use any UPN cert to authenticate.',
+        ADCSESC13:      'ESC13: Issuance policy linked to a group → enroll cert to gain group membership.',
+        SyncLAPSPassword:'Can synchronize LAPS password — allows reading the local administrator password.',
+        WriteGPLink:    'Can link a GPO to this OU/domain — allows applying malicious policy to all contained objects.',
+        CoerceToTGT:    'Can coerce Kerberos TGT delegation (e.g. via printer bug/PetitPotam) — enables credential theft.',
+        AZGlobalAdmin:  'Azure Global Administrator — highest Azure AD privilege, full tenant control.',
+        AZPrivilegedRoleAdmin: 'Can assign any Azure AD role including Global Admin.',
+        AZResetPassword:'Can reset the target Azure AD user password.',
+        AZAddSecret:    'Can add a client secret to an Azure AD application — enables authentication as the app.',
+        AZGetSecrets:   'Can read Key Vault secrets.',
+        AZGetKeys:      'Can read Key Vault cryptographic keys.',
+        AZGetCertificates: 'Can read Key Vault certificates.',
+        AZExecuteCommand: 'Can execute commands on an Azure VM (Run Command).',
+        AZVMAdminLogin: 'Can log into Azure VM as administrator via AAD-joined VM login.',
+        AZOwns:         'Owns an Azure AD object — can modify it unconditionally.',
+        AZAddMembers:   'Can add members to an Azure AD group.',
+        AZAddOwner:     'Can add an owner to an Azure AD application or group.',
+        AZMGAddMember:  'Microsoft Graph app role: can add members to groups.',
+        AZMGGrantRole:  'Microsoft Graph app role: can grant directory roles.',
+        AZContributor:  'Azure Contributor role on a resource — broad write/exec access.',
+        AZHasRole:      'Holds an Azure RBAC role on a resource.',
+        SyncedToEntraUser: 'On-premises AD account synced to Entra ID (Azure AD).',
+        HostsCAService: 'Computer hosts the Active Directory Certificate Services CA role.',
+    };
+
+    const EDGE_MITRE = {
+        AdminTo:            'T1021.001 – Remote Services: RDP / T1078 – Valid Accounts',
+        CanRDP:             'T1021.001 – Remote Services: Remote Desktop Protocol',
+        ExecuteDCOM:        'T1021.003 – Remote Services: DCOM',
+        CanPSRemote:        'T1021.006 – Remote Services: Windows Remote Management',
+        ForceChangePassword:'T1098 – Account Manipulation',
+        AddMember:          'T1098.007 – Account Manipulation: Additional Group Membership',
+        AddMembers:         'T1098.007 – Account Manipulation: Additional Group Membership',
+        AddSelf:            'T1098.007 – Account Manipulation: Additional Group Membership',
+        AddKeyCredentialLink:'T1556.006 – Modify Authentication Process: Multi-Factor Authentication',
+        GenericAll:         'T1078 – Valid Accounts / T1484 – Domain Policy Modification',
+        GenericWrite:       'T1098 – Account Manipulation / T1547 – Boot or Logon Autostart',
+        WriteSPN:           'T1558.003 – Steal or Forge Kerberos Tickets: Kerberoasting',
+        WriteOwner:         'T1222 – File and Directory Permissions Modification',
+        WriteDacl:          'T1222 – File and Directory Permissions Modification',
+        Owns:               'T1222 – File and Directory Permissions Modification',
+        GetChanges:         'T1003.006 – OS Credential Dumping: DCSync',
+        GetChangesAll:      'T1003.006 – OS Credential Dumping: DCSync',
+        DCSync:             'T1003.006 – OS Credential Dumping: DCSync',
+        ReadLAPSPassword:   'T1552.001 – Unsecured Credentials: Credentials in Files',
+        ReadGMSAPassword:   'T1552 – Unsecured Credentials',
+        SyncLAPSPassword:   'T1552.001 – Unsecured Credentials: Credentials in Files',
+        AllowedToDelegate:  'T1558.001 – Steal or Forge Kerberos Tickets: Golden Ticket',
+        AllowedToAct:       'T1558 – Steal or Forge Kerberos Tickets: RBCD',
+        AddAllowedToAct:    'T1558 – Steal or Forge Kerberos Tickets: RBCD',
+        WriteAccountRestrictions: 'T1558 – Steal or Forge Kerberos Tickets: RBCD',
+        ManageCA:           'T1649 – Steal or Forge Authentication Certificates',
+        ManageCertificates: 'T1649 – Steal or Forge Authentication Certificates',
+        Enroll:             'T1649 – Steal or Forge Authentication Certificates',
+        ADCSESC1:           'T1649 – Steal or Forge Authentication Certificates',
+        ADCSESC3:           'T1649 – Steal or Forge Authentication Certificates',
+        ADCSESC4:           'T1649 – Steal or Forge Authentication Certificates',
+        ADCSESC6:           'T1649 – Steal or Forge Authentication Certificates',
+        ADCSESC8:           'T1557 – Adversary-in-the-Middle / T1649',
+        CoerceToTGT:        'T1187 – Forced Authentication',
+        CanAbuseGPO:        'T1484.001 – Domain Policy Modification: Group Policy Modification',
+        WriteGPLink:        'T1484.001 – Domain Policy Modification: Group Policy Modification',
+        HasSession:         'T1563 – Remote Service Session Hijacking',
+        SQLAdmin:           'T1505.001 – Server Software Component: SQL Stored Procedures',
+        AZResetPassword:    'T1098 – Account Manipulation',
+        AZAddSecret:        'T1098.001 – Account Manipulation: Additional Cloud Credentials',
+        AZExecuteCommand:   'T1651 – Cloud Administration Command',
+        AZVMAdminLogin:     'T1078.004 – Valid Accounts: Cloud Accounts',
+        AZGetSecrets:       'T1552.001 – Unsecured Credentials',
     };
 
     const EXEC_EDGES = new Set([
@@ -370,6 +472,17 @@
         else if (metaType === 'ous'          || (!metaType && fn.includes('ou')))        fileType = 'OU';
         else if (metaType === 'certtemplates'|| (!metaType && fn.includes('cert')))      fileType = 'CertTemplate';
         else if (metaType === 'containers'   || (!metaType && fn.includes('container'))) fileType = 'Container';
+        else if (metaType === 'azddevices'   || metaType === 'azdevices'   || fn.includes('azdevice'))    fileType = 'AZDevice';
+        else if (metaType === 'azusers'      || fn.includes('azuser'))                                    fileType = 'AZUser';
+        else if (metaType === 'azgroups'     || fn.includes('azgroup'))                                   fileType = 'AZGroup';
+        else if (metaType === 'azapps'       || fn.includes('azapp'))                                     fileType = 'AZApp';
+        else if (metaType === 'azserviceprincipals' || fn.includes('azserviceprincipal'))                  fileType = 'AZServicePrincipal';
+        else if (metaType === 'aztenants'    || fn.includes('aztenant'))                                   fileType = 'AZTenant';
+        else if (metaType === 'azsubscriptions' || fn.includes('azsubscription'))                          fileType = 'AZSubscription';
+        else if (metaType === 'azresourcegroups' || fn.includes('azresourcegroup'))                        fileType = 'AZResourceGroup';
+        else if (metaType === 'azvms'        || fn.includes('azvm') || fn.includes('az_vm'))              fileType = 'AZVM';
+        else if (metaType === 'azkeyvaults'  || fn.includes('azkeyvault'))                                fileType = 'AZKeyVault';
+        else if (metaType === 'azmanagementgroups' || fn.includes('azmanagementgroup'))                    fileType = 'AZMgmtGroup';
         else if (metaType)                                                                fileType = metaType.charAt(0).toUpperCase() + metaType.slice(1);
 
         items.forEach(item => {
@@ -439,6 +552,12 @@
             parseArr(item.AllowedToEnroll,  'Enroll',            true);
             parseArr(item.SQLAdmins,        'SQLAdmin',          true);
             parseArr(item.ChildObjects,     'Contains',          false);
+
+            // Capture GPO friendly name for GUID resolution
+            if (detectedType === 'GPO' && props.name) {
+                const guid = (item.ObjectIdentifier || '').toUpperCase();
+                if (guid) gpoNames[guid] = props.name;
+            }
 
             // ACEs
             (item.Aces || []).forEach(ace => {
@@ -564,6 +683,18 @@
         }
     }
 
+    function resolveGPOName(id) {
+        // Try direct lookup by GUID
+        if (gpoNames[id]) return gpoNames[id];
+        // Try the node name
+        const node = adNodes[id];
+        if (node && node.type === 'GPO') {
+            const p = node.props;
+            if (p?.name && !p.name.match(/^\{[0-9A-F-]+\}$/i)) return p.name;
+        }
+        return null;
+    }
+
     // ================================================================
     // DCSync DETECTION
     // ================================================================
@@ -611,6 +742,12 @@
         document.getElementById('statDcsync').textContent  = dcsync;
         document.getElementById('statAcls').textContent    = crits;
         document.getElementById('statPaths').textContent   = '?';
+        const uncon = vals.filter(n => n.props?.unconstraineddelegation).length;
+        const certs = vals.filter(n => n.type === 'CertTemplate').length;
+        const unconEl = document.getElementById('statUnconstrained');
+        const certEl  = document.getElementById('statCerts');
+        if (unconEl) unconEl.textContent = uncon;
+        if (certEl)  certEl.textContent  = certs;
         document.getElementById('statsBar').classList.remove('hidden');
     }
 
@@ -712,12 +849,18 @@
     const NODE_COLORS = {
         User: '#3498db', Group: '#2ecc71', Computer: '#e67e22',
         Domain: '#8e44ad', GPO: '#95a5a6', OU: '#7f8c8d',
-        CertTemplate: '#d35400', Container: '#7f8c8d', Unknown: '#bdc3c7'
+        CertTemplate: '#d35400', Container: '#7f8c8d', Unknown: '#bdc3c7',
+        AZUser: '#0078d4', AZGroup: '#00b4de', AZDevice: '#00b294',
+        AZApp: '#9b59b6', AZServicePrincipal: '#8e44ad', AZTenant: '#c0392b',
+        AZSubscription: '#e67e22', AZResourceGroup: '#d35400',
+        AZVM: '#e74c3c', AZKeyVault: '#f39c12', AZMgmtGroup: '#8e44ad'
     };
 
     const NODE_SHAPES = {
         Domain: 'diamond', GPO: 'hexagon', OU: 'hexagon',
-        Computer: 'rectangle', CertTemplate: 'star'
+        Computer: 'rectangle', CertTemplate: 'star',
+        AZTenant: 'diamond', AZSubscription: 'hexagon', AZMgmtGroup: 'hexagon',
+        AZVM: 'rectangle', AZKeyVault: 'star'
     };
 
     function nodeColor(n) {
@@ -746,12 +889,19 @@
         const n = adNodes[id];
         if (!n) return id;
         if (document.getElementById('showSidLabels')?.checked) {
-            return nameToSid[id] || (n.props?.objectsid || n.props?.domainsid || id).toUpperCase();
+            if (/^S-1-/i.test(id)) return id;
+            return nameToSid[id] || n.props?.objectsid || n.props?.domainsid || id;
         }
         const mode = document.getElementById('labelMode')?.value || 'short';
         if (mode === 'full')  return n.name;
         if (mode === 'type')  return `[${n.type}]`;
-        return n.name.split('@')[0].split('\\').pop();
+        const base = n.name.split('@')[0].split('\\').pop();
+        // For GPOs: prefer friendly name over GUID
+        if (n.type === 'GPO') {
+            const friendly = resolveGPOName(id);
+            if (friendly) return friendly.split('@')[0];
+        }
+        return base;
     }
 
     function getLayoutConfig() {
@@ -879,7 +1029,8 @@
                         <span class="text-gray-300 text-xs">${esc(tgtName)}</span>
                     </div>
                     <div class="p-2 bg-gray-800/60 rounded border border-gray-700/60 text-xs text-gray-300">${esc(desc)}</div>
-                    <div class="mt-2 text-gray-500 text-xs">Risk weight: ${EDGE_RISK[label] || 10}/100</div>
+                    <div class="mt-2 text-gray-500 text-xs">Risk weight: <span class="font-bold text-white">${EDGE_RISK[label] || 10}</span>/100</div>
+                    ${EDGE_MITRE[label] ? `<div class="mt-1.5 p-1.5 bg-blue-900/20 border border-blue-800/30 rounded text-xs text-blue-300"><span class="text-blue-400 font-semibold">MITRE:</span> ${esc(EDGE_MITRE[label])}</div>` : ''}
                 </div>`;
             switchTab('details');
         });
@@ -1112,6 +1263,329 @@
         return tok;
     }
 
+    // ── Transitive helpers ─────────────────────────────────────────
+    function getTransitiveGroupMembers(groupId) {
+        const direct = new Set(adEdges.filter(e => e.to === groupId && e.label === 'MemberOf').map(e => e.from));
+        const all    = new Set(direct);
+        const queue  = [...direct];
+        const seen   = new Set([groupId]);
+        while (queue.length && all.size < 5000) {
+            const cur = queue.shift();
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            adEdges.filter(e => e.to === cur && e.label === 'MemberOf').forEach(e => {
+                if (!all.has(e.from)) { all.add(e.from); queue.push(e.from); }
+            });
+        }
+        return { direct, all };
+    }
+
+    function getTransitiveMemberships(nodeId) {
+        const direct = new Set(adEdges.filter(e => e.from === nodeId && e.label === 'MemberOf').map(e => e.to));
+        const all    = new Set(direct);
+        const queue  = [...direct];
+        const seen   = new Set([nodeId]);
+        while (queue.length) {
+            const cur = queue.shift();
+            if (seen.has(cur)) continue;
+            seen.add(cur);
+            adEdges.filter(e => e.from === cur && e.label === 'MemberOf').forEach(e => {
+                if (!all.has(e.to)) { all.add(e.to); queue.push(e.to); }
+            });
+        }
+        return { direct, all };
+    }
+
+    function getReachableHVTs(nodeId) {
+        const hvts   = new Set(Object.keys(adNodes).filter(id => adNodes[id].isAdmin || adNodes[id].props?.highvalue));
+        const visited = new Set([nodeId]);
+        const queue   = [nodeId];
+        let count = 0;
+        while (queue.length) {
+            const cur = queue.shift();
+            for (const e of adEdges) {
+                if (e.from !== cur || visited.has(e.to)) continue;
+                visited.add(e.to);
+                if (hvts.has(e.to)) count++;
+                queue.push(e.to);
+            }
+        }
+        return count;
+    }
+
+    function getSiblingObjects(nodeId) {
+        const containEdge = adEdges.find(e => e.to === nodeId && e.label === 'Contains');
+        if (!containEdge) return 0;
+        return adEdges.filter(e => e.from === containEdge.from && e.label === 'Contains' && e.to !== nodeId).length;
+    }
+
+    function getEffectiveGPOs(nodeId) {
+        const gpos    = new Set();
+        let   current = nodeId;
+        let   depth   = 0;
+        while (depth++ < 10) {
+            const parent = adEdges.find(e => e.to === current && e.label === 'Contains');
+            if (!parent) break;
+            adEdges.filter(e => e.from === parent.from && e.label === 'GPLink').forEach(e => gpos.add(e.to));
+            current = parent.from;
+        }
+        return gpos.size;
+    }
+
+    function getForeignMembers(groupId) {
+        const domain = (adNodes[groupId]?.props?.domain || groupId.split('@')[1] || '').toUpperCase();
+        return adEdges.filter(e => e.to === groupId && e.label === 'MemberOf').filter(e => {
+            const mDomain = (adNodes[e.from]?.props?.domain || e.from.split('@')[1] || '').toUpperCase();
+            return mDomain && domain && mDomain !== domain;
+        }).length;
+    }
+
+    function getUnrolledAdmins(computerId) {
+        const direct = new Set(adEdges.filter(e => e.to === computerId && e.label === 'AdminTo').map(e => e.from));
+        const unrolled = new Set(direct);
+        direct.forEach(pid => {
+            if (adNodes[pid]?.type === 'Group') {
+                const { all } = getTransitiveGroupMembers(pid);
+                all.forEach(m => unrolled.add(m));
+            }
+        });
+        return { explicit: direct.size, unrolled: unrolled.size };
+    }
+
+    function getDomainStats(domainId) {
+        const domain = (adNodes[domainId]?.props?.domain || adNodes[domainId]?.name || '').toUpperCase();
+        const inDomain = id => {
+            const n = adNodes[id];
+            const d = (n?.props?.domain || '').toUpperCase();
+            return d === domain || id === domainId;
+        };
+        const vals = Object.entries(adNodes);
+        return {
+            users:     vals.filter(([id,n]) => n.type === 'User'     && inDomain(id)).length,
+            groups:    vals.filter(([id,n]) => n.type === 'Group'    && inDomain(id)).length,
+            computers: vals.filter(([id,n]) => n.type === 'Computer' && inDomain(id)).length,
+            ous:       vals.filter(([id,n]) => n.type === 'OU'       && inDomain(id)).length,
+            gpos:      vals.filter(([id,n]) => n.type === 'GPO'      && inDomain(id)).length,
+        };
+    }
+
+    function getDirectAffectingGPOs(ouId) {
+        return adEdges.filter(e => e.from === ouId && e.label === 'GPLink').length;
+    }
+
+    function getAllAffectingGPOs(ouId) {
+        const gpos = new Set();
+        adEdges.filter(e => e.from === ouId && e.label === 'GPLink').forEach(e => gpos.add(e.to));
+        let current = ouId;
+        for (let depth = 0; depth < 10; depth++) {
+            const parentEdge = adEdges.find(e => e.to === current && e.label === 'Contains');
+            if (!parentEdge) break;
+            adEdges.filter(e => e.from === parentEdge.from && e.label === 'GPLink').forEach(e => gpos.add(e.to));
+            current = parentEdge.from;
+        }
+        return gpos.size;
+    }
+
+    function getObjectControl(nodeId) {
+        const firstDegreeTargets = new Set(
+            adEdges.filter(e => e.from === nodeId && HIGH_RISK_ACLS.has(e.label)).map(e => e.to)
+        );
+        const groups = adEdges.filter(e => e.from === nodeId && e.label === 'MemberOf').map(e => e.to);
+        const groupDelegatedTargets = new Set();
+        groups.forEach(gid => {
+            adEdges.filter(e => e.from === gid && HIGH_RISK_ACLS.has(e.label)).forEach(e => {
+                if (!firstDegreeTargets.has(e.to)) groupDelegatedTargets.add(e.to);
+            });
+        });
+        return { firstDegree: firstDegreeTargets.size, groupDelegated: groupDelegatedTargets.size };
+    }
+
+    function getInboundControllers(nodeId) {
+        const explicit = new Set(
+            adEdges.filter(e => e.to === nodeId && HIGH_RISK_ACLS.has(e.label)).map(e => e.from)
+        );
+        const unrolled = new Set(explicit);
+        explicit.forEach(pid => {
+            if (adNodes[pid]?.type === 'Group') {
+                const { all } = getTransitiveGroupMembers(pid);
+                all.forEach(m => unrolled.add(m));
+            }
+        });
+        return { explicit: explicit.size, unrolled: unrolled.size };
+    }
+
+    function getGroupExecutionRights(groupId) {
+        const rdpDirect  = adEdges.filter(e => e.from === groupId && e.label === 'CanRDP').length;
+        const dcomDirect = adEdges.filter(e => e.from === groupId && e.label === 'ExecuteDCOM').length;
+        const { all } = getTransitiveGroupMembers(groupId);
+        let rdpGroup = 0, dcomGroup = 0;
+        all.forEach(memberId => {
+            if (adNodes[memberId]?.type === 'Group') {
+                rdpGroup  += adEdges.filter(e => e.from === memberId && e.label === 'CanRDP').length;
+                dcomGroup += adEdges.filter(e => e.from === memberId && e.label === 'ExecuteDCOM').length;
+            }
+        });
+        return { rdpDirect, rdpGroup, dcomDirect, dcomGroup };
+    }
+
+    function renderControlSection(title, rows) {
+        return `<div class="mb-3 border border-gray-700/60 rounded overflow-hidden">
+            <div class="bg-gray-800/80 px-2 py-1.5 text-xs font-semibold text-gray-300 uppercase tracking-wide border-b border-gray-700/60">${title}</div>
+            ${rows}
+        </div>`;
+    }
+
+    function renderOverviewRow(label, value, onclick) {
+        return `<div class="flex items-center justify-between py-1 px-2 border-b border-gray-800/60 ${onclick ? 'hover:bg-gray-700/60 cursor-pointer' : ''}" ${onclick ? `onclick="${onclick}"` : ''}>
+            <span class="text-gray-400 text-xs">${label}</span>
+            <span class="text-white text-xs font-bold">${value}</span>
+        </div>`;
+    }
+
+    function renderAnalysisShortcuts(nodeId, nodeType) {
+        const shortcuts = [];
+        const tok = nodeToken(nodeId);
+
+        if (nodeType === 'User' || nodeType === 'Computer') {
+            shortcuts.push({ label: 'Shortest Path to DA', fn: `quickPathToDA('${tok}')` });
+            shortcuts.push({ label: 'Show Reachable HVTs', fn: `quickReachableHVTs('${tok}')` });
+        }
+        if (nodeType === 'User') {
+            shortcuts.push({ label: 'Find Kerberoastable Path', fn: `quickKerb('${tok}')` });
+            shortcuts.push({ label: 'Show Group Memberships', fn: `quickGroupMemberships('${tok}')` });
+        }
+        if (nodeType === 'Group') {
+            shortcuts.push({ label: 'Show All Members', fn: `quickGroupMembers('${tok}')` });
+            shortcuts.push({ label: 'Shortest Path from Members to DA', fn: `quickPathToDA('${tok}')` });
+        }
+        if (nodeType === 'Computer') {
+            shortcuts.push({ label: 'Show Local Admins Graph', fn: `quickAdminsOn('${tok}')` });
+            shortcuts.push({ label: 'Show RDP Users Graph', fn: `quickRDPOn('${tok}')` });
+        }
+        if (nodeType === 'Domain') {
+            shortcuts.push({ label: 'All Paths to DA', fn: `findAllPaths()` });
+            shortcuts.push({ label: 'Show DCSync Principals', fn: `runQuery('dcsync'); switchTab('paths')` });
+            shortcuts.push({ label: 'Kerberoastable Paths', fn: `runQuery('kerberoastable'); switchTab('paths')` });
+            shortcuts.push({ label: 'AS-REP Roastable', fn: `runQuery('asrep'); switchTab('paths')` });
+        }
+
+        if (!shortcuts.length) return '';
+        return `<div class="mb-3">
+            <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Analysis Shortcuts</div>
+            <div class="space-y-0.5">
+                ${shortcuts.map(s => `<button onclick="${s.fn}" class="w-full text-left text-xs px-2 py-1.5 rounded bg-gray-800/60 hover:bg-gray-700/60 text-gray-300 hover:text-white transition border border-gray-700/40">${esc(s.label)}</button>`).join('')}
+            </div>
+        </div>`;
+    }
+
+    function quickPathToDA(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        const result = bfsPath(nodeId, daSet);
+        if (!result) { alert('No path to DA found from ' + nodeId); return; }
+        foundPaths = [{ from: nodeId, path: result, hops: result.nodes.length - 1 }];
+        renderPathsPanel(); switchTab('paths'); highlightPath(result.nodes);
+    }
+
+    function quickReachableHVTs(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const hvts = new Set(Object.keys(adNodes).filter(id => adNodes[id].isAdmin || adNodes[id].props?.highvalue));
+        const visited = new Set([nodeId]);
+        const queue   = [nodeId];
+        foundPaths = [];
+        while (queue.length) {
+            const cur = queue.shift();
+            for (const e of adEdges) {
+                if (e.from !== cur || visited.has(e.to)) continue;
+                visited.add(e.to);
+                if (hvts.has(e.to)) {
+                    const r = bfsPath(nodeId, new Set([e.to]));
+                    if (r) foundPaths.push({ from: nodeId, path: r, hops: r.nodes.length - 1, queryLabel: 'HVT: ' + (adNodes[e.to]?.name.split('@')[0] || e.to) });
+                }
+                queue.push(e.to);
+            }
+        }
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickKerb(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        if (!adNodes[nodeId]?.props?.hasspn) { alert('This user is not Kerberoastable.'); return; }
+        quickPathToDA(tok);
+    }
+
+    function quickGroupMemberships(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const { all } = getTransitiveMemberships(nodeId);
+        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        foundPaths = [];
+        all.forEach(gid => {
+            if (daSet.has(gid)) foundPaths.push({ from: nodeId, path: { nodes: [nodeId, gid], edges: ['MemberOf'] }, hops: 1, queryLabel: 'Group: ' + (adNodes[gid]?.name.split('@')[0] || gid) });
+        });
+        if (!foundPaths.length) foundPaths = [...all].slice(0, 50).map(gid => ({ from: nodeId, path: { nodes: [nodeId, gid], edges: ['MemberOf'] }, hops: 1, queryLabel: 'Group Member' }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickGroupMembers(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const { direct, all } = getTransitiveGroupMembers(nodeId);
+        foundPaths = [...all].slice(0, 100).map(mid => ({
+            from: mid,
+            path: { nodes: [mid, nodeId], edges: ['MemberOf'] },
+            hops: direct.has(mid) ? 0 : 1,
+            queryLabel: direct.has(mid) ? 'Direct Member' : 'Transitive Member'
+        }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickAdminsOn(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const adminEdges = adEdges.filter(e => e.to === nodeId && e.label === 'AdminTo');
+        foundPaths = adminEdges.map(e => ({ from: e.from, path: { nodes: [e.from, nodeId], edges: ['AdminTo'] }, hops: 1, queryLabel: 'Local Admin' }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickRDPOn(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const rdpEdges = adEdges.filter(e => e.to === nodeId && e.label === 'CanRDP');
+        foundPaths = rdpEdges.map(e => ({ from: e.from, path: { nodes: [e.from, nodeId], edges: ['CanRDP'] }, hops: 1, queryLabel: 'RDP User' }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickOutboundControl(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const targets = new Set(adEdges.filter(e => e.from === nodeId && HIGH_RISK_ACLS.has(e.label)).map(e => e.to));
+        // also via groups
+        adEdges.filter(e => e.from === nodeId && e.label === 'MemberOf').forEach(ge => {
+            adEdges.filter(e => e.from === ge.to && HIGH_RISK_ACLS.has(e.label)).forEach(e => targets.add(e.to));
+        });
+        foundPaths = [];
+        targets.forEach(tid => {
+            const r = bfsPath(nodeId, new Set([tid]));
+            if (r) foundPaths.push({ from: nodeId, path: r, hops: r.nodes.length - 1, queryLabel: 'Object Control → ' + (adNodes[tid]?.name.split('@')[0] || tid) });
+        });
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickInboundControl(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const controllers = new Set(adEdges.filter(e => e.to === nodeId && HIGH_RISK_ACLS.has(e.label)).map(e => e.from));
+        foundPaths = [...controllers].slice(0, 100).map(cid => {
+            const edge = adEdges.find(e => e.from === cid && e.to === nodeId && HIGH_RISK_ACLS.has(e.label));
+            return { from: cid, path: { nodes: [cid, nodeId], edges: [edge?.label || 'Controls'] }, hops: 1, queryLabel: 'Controls via ' + (edge?.label || '?') };
+        });
+        renderPathsPanel(); switchTab('paths');
+    }
+
     function showNodeDetails(nodeId) {
         const n = adNodes[nodeId];
         if (!n) return;
@@ -1122,7 +1596,6 @@
         const rc = getRiskColor(score);
         const nc = nodeColor(n);
 
-        // Detect unresolved SID nodes (name IS the SID, no display name was ever resolved)
         const isSidNode = /^S-1-/i.test(nodeId) && n.type === 'Unknown';
         const rid = isSidNode ? nodeId.split('-').pop() : null;
 
@@ -1156,6 +1629,7 @@
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="color:${rc};border:1px solid ${rc}44">${getRiskLabel(score)} Risk &bull; ${score}/100</span>
                 ${n.isAdmin ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/60 text-yellow-300 border border-yellow-700">HIGH VALUE</span>' : ''}
                 ${n.canDCSync ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300 border border-red-700">DCSYNC</span>' : ''}
+                ${ownedNodes.has(nodeId) ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-900/60 text-green-300 border border-green-700">☠ OWNED</span>' : ''}
             </div>
         </div>`;
 
@@ -1173,6 +1647,141 @@
             ${br > 0 ? `<span class="text-xs text-gray-400">Blast radius: <span class="text-orange-400 font-bold">${br}</span> nodes</span>` : ''}
         </div>`;
 
+        // ── BloodHound-style OVERVIEW section (type-specific) ──────────
+        html += `<div class="mb-3 border border-gray-700/60 rounded overflow-hidden">
+            <div class="bg-gray-800/80 px-2 py-1.5 text-xs font-semibold text-gray-300 uppercase tracking-wide border-b border-gray-700/60">Overview</div>`;
+
+        if (n.type === 'Domain') {
+            const ds = getDomainStats(nodeId);
+            const dtok = nodeToken(nodeId);
+            html += renderOverviewRow('Users',     ds.users,     `activeFilters.excludeTypes=new Set(['Group','Computer','Domain','GPO','OU','CertTemplate','Container','Unknown']); renderGraph()`);
+            html += renderOverviewRow('Groups',    ds.groups,    null);
+            html += renderOverviewRow('Computers', ds.computers, null);
+            html += renderOverviewRow('OUs',       ds.ous,       null);
+            html += renderOverviewRow('GPOs',      ds.gpos,      null);
+            html += renderOverviewRow('Functional Level', n.props?.functionallevel || n.props?.domainFunctionalityLevel || '—', null);
+
+        } else if (n.type === 'Group') {
+            const { direct, all } = getTransitiveGroupMembers(nodeId);
+            const memberships = getTransitiveMemberships(nodeId);
+            const hvts    = getReachableHVTs(nodeId);
+            const sessions= adEdges.filter(e => e.from === nodeId && e.label === 'HasSession').length;
+            const foreign  = getForeignMembers(nodeId);
+            const gtok = nodeToken(nodeId);
+            html += renderOverviewRow('Sessions',              sessions,      null);
+            html += renderOverviewRow('Reachable High Value Targets', hvts,  null);
+            html += `<div class="border-t border-gray-700/40 mt-0.5 pt-0.5">`;
+            html += renderOverviewRow('Direct Members',        direct.size,   `quickGroupMembers('${gtok}')`);
+            html += renderOverviewRow('Unrolled Members',      all.size,      `quickGroupMembers('${gtok}')`);
+            html += renderOverviewRow('Foreign Members',       foreign,       null);
+            html += `</div><div class="border-t border-gray-700/40 mt-0.5 pt-0.5">`;
+            html += renderOverviewRow('First Degree Group Membership', memberships.direct.size, `quickGroupMemberships('${gtok}')`);
+            html += renderOverviewRow('Unrolled Member Of',    memberships.all.size, `quickGroupMemberships('${gtok}')`);
+            html += `</div>`;
+
+        } else if (n.type === 'Computer') {
+            const { explicit, unrolled } = getUnrolledAdmins(nodeId);
+            const domain = (n.props?.domain || nodeId.split('@')[1] || '').toUpperCase();
+            const foreignAdmins = adEdges.filter(e => e.to === nodeId && e.label === 'AdminTo').filter(e => {
+                const d = (adNodes[e.from]?.props?.domain || '').toUpperCase();
+                return d && domain && d !== domain;
+            }).length;
+            const rdpDirect = adEdges.filter(e => e.to === nodeId && e.label === 'CanRDP').length;
+            const rdpGroup  = adEdges.filter(e => e.to === nodeId && e.label === 'CanRDP' && adNodes[e.from]?.type === 'Group').length;
+            const dcomDirect= adEdges.filter(e => e.to === nodeId && e.label === 'ExecuteDCOM').length;
+            const dcomGroup = adEdges.filter(e => e.to === nodeId && e.label === 'ExecuteDCOM' && adNodes[e.from]?.type === 'Group').length;
+            const sqlAdmins = adEdges.filter(e => e.to === nodeId && e.label === 'SQLAdmin').length;
+            const sessions  = adEdges.filter(e => e.from === nodeId && e.label === 'HasSession').length;
+            const ctok = nodeToken(nodeId);
+            html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold">Local Admins</div>`;
+            html += renderOverviewRow('Explicit Admins',   explicit,  `quickAdminsOn('${ctok}')`);
+            html += renderOverviewRow('Unrolled Admins',   unrolled,  `quickAdminsOn('${ctok}')`);
+            html += renderOverviewRow('Foreign Admins',    foreignAdmins, null);
+            html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold border-t border-gray-700/40">Inbound Execution Rights</div>`;
+            html += renderOverviewRow('First Degree RDP Users',       rdpDirect - rdpGroup, `quickRDPOn('${ctok}')`);
+            html += renderOverviewRow('Group Delegated RDP Users',    rdpGroup,             `quickRDPOn('${ctok}')`);
+            html += renderOverviewRow('First Degree DCOM Users',      dcomDirect - dcomGroup, null);
+            html += renderOverviewRow('Group Delegated DCOM Users',   dcomGroup,            null);
+            html += renderOverviewRow('SQL Admins',                   sqlAdmins,            null);
+            html += renderOverviewRow('Active Sessions',              sessions,             null);
+
+        } else if (n.type === 'User') {
+            const hvts     = getReachableHVTs(nodeId);
+            const sessions = adEdges.filter(e => e.to === nodeId && e.label === 'HasSession').length;
+            const siblings = getSiblingObjects(nodeId);
+            const gpos     = getEffectiveGPOs(nodeId);
+            const memberships = getTransitiveMemberships(nodeId);
+            const utok = nodeToken(nodeId);
+            html += renderOverviewRow('Sessions (logons observed)',    sessions, null);
+            html += renderOverviewRow('Sibling Objects in Same OU',   siblings, null);
+            html += renderOverviewRow('Reachable High Value Targets',  hvts,    `quickReachableHVTs('${utok}')`);
+            html += renderOverviewRow('Effective Inbound GPOs',        gpos,    null);
+            html += renderOverviewRow('First Degree Group Membership', memberships.direct.size, `quickGroupMemberships('${utok}')`);
+            html += renderOverviewRow('Unrolled Member Of',            memberships.all.size,    `quickGroupMemberships('${utok}')`);
+
+        } else if (n.type === 'GPO') {
+            const linkedTo = adEdges.filter(e => e.to === nodeId && e.label === 'GPLink');
+            const manageBy = adEdges.filter(e => e.to === nodeId && e.label === 'CanAbuseGPO');
+            const friendly = resolveGPOName(nodeId);
+            if (friendly) html += renderOverviewRow('Friendly Name', friendly, null);
+            html += renderOverviewRow('Linked to OUs/Domains',  linkedTo.length, null);
+            html += renderOverviewRow('Principals that can Abuse', manageBy.length, null);
+
+        } else if (n.type === 'OU') {
+            const members  = adEdges.filter(e => e.from === nodeId && e.label === 'Contains');
+            const gpoDirect= getDirectAffectingGPOs(nodeId);
+            const gpoTotal = getAllAffectingGPOs(nodeId);
+            html += renderOverviewRow('Direct Objects',                    members.length, null);
+            html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold border-t border-gray-700/40">Affecting GPOs</div>`;
+            html += renderOverviewRow('GPOs Directly Affecting This OU',   gpoDirect,      null);
+            html += renderOverviewRow('GPOs Affecting This OU',            gpoTotal,       null);
+
+        } else {
+            const hvts = getReachableHVTs(nodeId);
+            html += renderOverviewRow('Reachable High Value Targets', hvts, null);
+        }
+
+        html += `</div>`; // end Overview box
+
+        // ── Execution Rights (Group nodes) ─────────────────────────────
+        if (n.type === 'Group') {
+            const ex = getGroupExecutionRights(nodeId);
+            html += renderControlSection('Execution Rights',
+                renderOverviewRow('First Degree RDP Privileges',   ex.rdpDirect,  null) +
+                renderOverviewRow('Group Delegated RDP Privileges', ex.rdpGroup,   null) +
+                renderOverviewRow('First Degree DCOM Privileges',   ex.dcomDirect, null) +
+                renderOverviewRow('Group Delegated DCOM Privileges',ex.dcomGroup,  null)
+            );
+        }
+
+        // ── Outbound Object Control (Group, User, Computer) ────────────
+        if (n.type === 'Group' || n.type === 'User' || n.type === 'Computer') {
+            const oc = getObjectControl(nodeId);
+            const octok = nodeToken(nodeId);
+            html += renderControlSection('Outbound Object Control',
+                renderOverviewRow('First Degree Object Control',   oc.firstDegree,   null) +
+                renderOverviewRow('Group Delegated Object Control', oc.groupDelegated, null) +
+                `<div class="flex items-center justify-between py-1 px-2 hover:bg-gray-700/60 cursor-pointer" onclick="quickOutboundControl('${octok}')">
+                    <span class="text-gray-400 text-xs">Transitive Object Control</span>
+                    <span class="text-white text-xs font-bold">&#9654;</span>
+                </div>`
+            );
+        }
+
+        // ── Inbound Control Rights (all significant types) ─────────────
+        if (n.type === 'Group' || n.type === 'User' || n.type === 'Computer' || n.type === 'Domain' || n.type === 'GPO' || n.type === 'OU') {
+            const ic = getInboundControllers(nodeId);
+            const ictok = nodeToken(nodeId);
+            html += renderControlSection('Inbound Control Rights',
+                renderOverviewRow('Explicit Object Controllers',     ic.explicit, null) +
+                renderOverviewRow('Unrolled Object Controllers',     ic.unrolled, null) +
+                `<div class="flex items-center justify-between py-1 px-2 hover:bg-gray-700/60 cursor-pointer" onclick="quickInboundControl('${ictok}')">
+                    <span class="text-gray-400 text-xs">Transitive Object Controllers</span>
+                    <span class="text-white text-xs font-bold">&#9654;</span>
+                </div>`
+            );
+        }
+
         if (allFlags.length) {
             html += `<div class="mb-3">
                 <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Risk Flags</div>
@@ -1184,12 +1793,15 @@
 
         const p = n.props || {};
         const propDefs = [
+            ['Display Name', p.displayname || p.samaccountname],
             ['SID',          p.objectsid || p.domainsid],
             ['Domain',       p.domain],
             ['DN',           p.distinguishedname],
             ['Enabled',      p.enabled != null ? String(p.enabled) : null],
+            ['Admin Count',  p.admincount ? 'True' : null],
             ['OS',           p.operatingsystem],
             ['OS SP',        p.operatingsystemservicepack],
+            ['Func. Level',  p.functionallevel || p.domainFunctionalityLevel],
             ['Last Logon',   p.lastlogon    ? tsDate(p.lastlogon)    : null],
             ['Pwd Last Set', p.pwdlastset   ? tsDate(p.pwdlastset)   : null],
             ['Created',      p.whencreated  ? tsDate(p.whencreated)  : null],
@@ -1197,11 +1809,12 @@
             ['Email',        p.email],
             ['Title',        p.title],
             ['Department',   p.department],
+            ['samAccountName', p.samaccountname],
         ].filter(([,v]) => v != null && v !== '');
 
         if (propDefs.length) {
             html += `<div class="mb-3">
-                <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Properties</div>
+                <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">Node Properties</div>
                 <table class="w-full text-xs border-collapse">
                     ${propDefs.map(([k,v]) =>
                         `<tr class="border-b border-gray-800/50">
@@ -1254,25 +1867,26 @@
             </div>`;
         }
 
-        if (adminOn.length)  html += renderEdgeSection('Local Admin On',       adminOn,    nodeId, true);
-        if (rdpOn.length)    html += renderEdgeSection('RDP Access To',         rdpOn,      nodeId, true);
-        if (psOn.length)     html += renderEdgeSection('PS-Remote To',          psOn,       nodeId, true);
-        if (adminBy.length)  html += renderEdgeSection('Local Admins (inbound)', adminBy,   nodeId, false);
-        if (rdpBy.length)    html += renderEdgeSection('RDP Users (inbound)',    rdpBy,     nodeId, false);
-        if (contains.length) html += renderEdgeSection('Contains',              contains,   nodeId, true);
-        if (gpLinksOut.length) html += renderEdgeSection('Linked GPOs',         gpLinksOut, nodeId, true);
-        if (gpLinks.length)  html += renderEdgeSection('Linked To (Domains/OUs)', gpLinks,  nodeId, false);
+        if (adminOn.length)  html += renderEdgeSection('Local Admin On',          adminOn,    nodeId, true);
+        if (rdpOn.length)    html += renderEdgeSection('RDP Access To',            rdpOn,      nodeId, true);
+        if (psOn.length)     html += renderEdgeSection('PS-Remote To',             psOn,       nodeId, true);
+        if (adminBy.length)  html += renderEdgeSection('Local Admins (inbound)',   adminBy,    nodeId, false);
+        if (rdpBy.length)    html += renderEdgeSection('RDP Users (inbound)',      rdpBy,      nodeId, false);
+        if (contains.length) html += renderEdgeSection('Contains',                 contains,   nodeId, true);
+        if (gpLinksOut.length) html += renderEdgeSection('Linked GPOs',            gpLinksOut, nodeId, true);
+        if (gpLinks.length)  html += renderEdgeSection('Linked To (Domains/OUs)', gpLinks,    nodeId, false);
 
-        // Remaining edges (exclude what we already showed above)
         const shownLabels = new Set(['AdminTo','CanRDP','CanPSRemote','Contains','GPLink']);
         const outOther = adEdges.filter(e => e.from === nodeId && !shownLabels.has(e.label));
         const inOther  = adEdges.filter(e => e.to   === nodeId && !shownLabels.has(e.label));
         if (outOther.length) html += renderEdgeSection('Other Outgoing', outOther, nodeId, true);
         if (inOther.length)  html += renderEdgeSection('Other Incoming', inOther,  nodeId, false);
 
+        // Analysis shortcuts (BloodHound-style Analysis tab content, inline)
+        html += renderAnalysisShortcuts(nodeId, n.type);
+
         document.getElementById('pane-details').innerHTML = html;
 
-        // Dim everything except neighborhood
         if (cy) {
             const el = cy.getElementById(nodeId);
             if (el.length) {
@@ -1588,6 +2202,52 @@
             adEdges.filter(e => writeEdges.includes(e.label)).forEach(e => {
                 foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: [e.label] }, hops: 1, queryLabel: e.label });
             });
+
+        } else if (qtype === 'rbcd') {
+            // RBCD: who can write AllowedToAct/AddAllowedToAct/WriteAccountRestrictions on computers
+            const rbcdEdges = ['AllowedToAct','AddAllowedToAct','WriteAccountRestrictions'];
+            adEdges.filter(e => rbcdEdges.includes(e.label) && adNodes[e.to]?.type === 'Computer').forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: [e.label] }, hops: 1, queryLabel: `RBCD: ${e.label}` });
+            });
+
+        } else if (qtype === 'constrained') {
+            // Constrained delegation targets
+            adEdges.filter(e => e.label === 'AllowedToDelegate').forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['AllowedToDelegate'] }, hops: 1, queryLabel: 'Constrained Deleg' });
+            });
+
+        } else if (qtype === 'shadowcred') {
+            // Shadow credential attack
+            adEdges.filter(e => e.label === 'AddKeyCredentialLink').forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['AddKeyCredentialLink'] }, hops: 1, queryLabel: 'Shadow Credential' });
+            });
+
+        } else if (qtype === 'forest') {
+            // Forest trust paths: find TrustedBy edges and BFS across them
+            const trustEdges = adEdges.filter(e => e.label === 'TrustedBy');
+            trustEdges.forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['TrustedBy'] }, hops: 1, queryLabel: 'Forest Trust' });
+            });
+            // Also find any paths that cross domain boundaries via trusts
+            const trustedDomains = new Set(trustEdges.map(e => e.from));
+            const daSet2 = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+            trustedDomains.forEach(dom => {
+                const result = bfsPath(dom, daSet2);
+                if (result && result.nodes.length > 1)
+                    foundPaths.push({ from: dom, path: result, hops: result.nodes.length - 1, queryLabel: 'Cross-Forest → DA' });
+            });
+
+        } else if (qtype === 'adcs') {
+            const escFindings = detectADCS();
+            escFindings.forEach(f => {
+                // Try to find the template node
+                const templateNode = Object.keys(adNodes).find(id => adNodes[id].name.includes(f.template));
+                if (templateNode) {
+                    foundPaths.push({ from: templateNode, path: { nodes: [templateNode], edges: [] }, hops: 0, queryLabel: f.esc + ': ' + f.template });
+                } else {
+                    foundPaths.push({ from: f.template, path: { nodes: [f.template], edges: [] }, hops: 0, queryLabel: f.esc + ': ' + f.detail.slice(0, 60) });
+                }
+            });
         }
 
         foundPaths.sort((a, b) => a.hops - b.hops);
@@ -1609,11 +2269,16 @@
         <div class="flex flex-wrap gap-1">
             <button onclick="runQuery('kerberoastable')" class="px-2 py-0.5 rounded text-xs bg-yellow-900/50 text-yellow-300 border border-yellow-700/50 hover:bg-yellow-800/60 transition">Kerberoastable</button>
             <button onclick="runQuery('asrep')"          class="px-2 py-0.5 rounded text-xs bg-orange-900/50 text-orange-300 border border-orange-700/50 hover:bg-orange-800/60 transition">AS-REP</button>
-            <button onclick="runQuery('unconstrained')"  class="px-2 py-0.5 rounded text-xs bg-red-900/50 text-red-300 border border-red-700/50 hover:bg-red-800/60 transition">Unconstrained</button>
+            <button onclick="runQuery('unconstrained')"  class="px-2 py-0.5 rounded text-xs bg-red-900/50 text-red-300 border border-red-700/50 hover:bg-red-800/60 transition">Unconstrained Deleg</button>
+            <button onclick="runQuery('constrained')"    class="px-2 py-0.5 rounded text-xs bg-red-900/40 text-red-300 border border-red-700/40 hover:bg-red-800/50 transition">Constrained Deleg</button>
+            <button onclick="runQuery('rbcd')"           class="px-2 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 hover:bg-purple-800/60 transition">RBCD</button>
+            <button onclick="runQuery('shadowcred')"     class="px-2 py-0.5 rounded text-xs bg-pink-900/50 text-pink-300 border border-pink-700/50 hover:bg-pink-800/60 transition">Shadow Cred</button>
             <button onclick="runQuery('laps')"           class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">LAPS</button>
             <button onclick="runQuery('gmsa')"           class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">GMSA</button>
             <button onclick="runQuery('dcsync')"         class="px-2 py-0.5 rounded text-xs bg-red-900/70 text-red-300 border border-red-600/60 hover:bg-red-800/70 transition">DCSync</button>
             <button onclick="runQuery('writable')"       class="px-2 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 hover:bg-purple-800/60 transition">Writable ACLs</button>
+            <button onclick="runQuery('forest')"         class="px-2 py-0.5 rounded text-xs bg-teal-900/50 text-teal-300 border border-teal-700/50 hover:bg-teal-800/60 transition">Forest Trusts</button>
+            <button onclick="runQuery('adcs')"           class="px-2 py-0.5 rounded text-xs bg-orange-900/50 text-orange-300 border border-orange-700/50 hover:bg-orange-800/60 transition">ADCS ESC</button>
             <button onclick="findPathsFromOwned()" id="btnFindOwned"
                 class="px-2 py-0.5 rounded text-xs bg-green-900/50 text-green-300 border border-green-700/50 hover:bg-green-800/60 transition">☠ From Owned (0)</button>
         </div>
@@ -1661,6 +2326,50 @@
         }
         pane.innerHTML = html;
         updateOwnedBadge();
+    }
+
+    // ================================================================
+    // ADCS ESC DETECTION
+    // ================================================================
+    function detectADCS() {
+        const results = [];
+        const certTemplates = Object.entries(adNodes).filter(([,n]) => n.type === 'CertTemplate');
+
+        certTemplates.forEach(([id, node]) => {
+            const p = node.props || {};
+            const name = node.name.split('@')[0];
+
+            // ESC1: enrollee supplies subject + no manager approval + auth EKU
+            if (p.enrolleesuppliessubject && !p.requiresmanagerapproval &&
+                (p.authenticationenabled || p.ekus?.some(e => e?.includes('Client Authentication') || e?.includes('Smart Card')))) {
+                results.push({ esc: 'ESC1', template: name, detail: 'Enrollee-supplied SAN + Client Auth EKU + no approval required' });
+            }
+            // ESC2: any purpose or no EKU
+            if (!p.requiresmanagerapproval && (!p.ekus || p.ekus.length === 0 || p.ekus.includes('2.5.29.37.0'))) {
+                results.push({ esc: 'ESC2', template: name, detail: 'Any Purpose EKU or empty EKU — can be used for authentication' });
+            }
+            // ESC3: Enrollment Agent template (Certificate Request Agent EKU)
+            if (p.ekus?.some(e => e?.includes('Certificate Request Agent') || e === '1.3.6.1.4.1.311.20.2.1')) {
+                results.push({ esc: 'ESC3', template: name, detail: 'Certificate Request Agent EKU — can enroll on behalf of other users' });
+            }
+            // ESC4: write access to template (ACEs with GenericWrite/WriteProperty/WriteDacl etc.)
+            const templateWriters = adEdges.filter(e => e.to === id && ['GenericWrite','WriteProperty','WriteDacl','GenericAll','Owns','WriteOwner'].includes(e.label));
+            if (templateWriters.length > 0) {
+                templateWriters.forEach(e => {
+                    const from = adNodes[e.from]?.name.split('@')[0] || e.from;
+                    results.push({ esc: 'ESC4', template: name, detail: `${from} has ${e.label} on template — can modify to enable ESC1` });
+                });
+            }
+        });
+
+        // ESC6: CA with EDITF_ATTRIBUTESUBJECTALTNAME2 (stored on CA node props)
+        Object.values(adNodes).filter(n => n.type === 'Computer' || n.props?.casecuritycollected).forEach(n => {
+            if (n.props?.caname && n.props?.flags && String(n.props.flags).includes('EDITF_ATTRIBUTESUBJECTALTNAME2')) {
+                results.push({ esc: 'ESC6', template: n.props.caname || n.name.split('@')[0], detail: 'CA has EDITF_ATTRIBUTESUBJECTALTNAME2 flag — any request can include attacker SAN' });
+            }
+        });
+
+        return results;
     }
 
     // ================================================================
@@ -1745,6 +2454,23 @@
         html += section('AS-REP Roastable Accounts', '#e67e22', asrep, nodeRow);
         html += section('Unconstrained Delegation', '#f1c40f', unconstrained, nodeRow);
         html += section('SID History Present', '#f1c40f', sidHistory, nodeRow);
+
+        // ADCS ESC detection
+        const escFindings = detectADCS();
+        if (escFindings.length) {
+            html += `<div class="mb-4">
+                <div class="font-semibold text-xs mb-1.5 uppercase tracking-wide text-orange-400">ADCS ESC Vulnerabilities (${escFindings.length})</div>`;
+            escFindings.slice(0, 20).forEach(f => {
+                html += `<div class="text-xs py-1 px-2 mb-1 bg-orange-900/20 border border-orange-800/40 rounded">
+                    <span class="text-orange-300 font-bold">${esc(f.esc)}</span>
+                    <span class="text-gray-400 mx-1">—</span>
+                    <span class="text-gray-200">${esc(f.template)}</span>
+                    <div class="text-gray-500 mt-0.5">${esc(f.detail)}</div>
+                </div>`;
+            });
+            if (escFindings.length > 20) html += `<div class="text-gray-600 text-xs">...and ${escFindings.length - 20} more</div>`;
+            html += `</div>`;
+        }
 
         if (highRisk.length) {
             html += `<div class="mb-4">
@@ -1955,10 +2681,71 @@
         a.click();
     }
 
+    function exportCSV() {
+        if (!Object.keys(adNodes).length) { alert('No data loaded'); return; }
+
+        const rows = [];
+        // Sheet 1 style: one row per finding
+        rows.push(['Type','Name','NodeType','RiskScore','RiskLabel','Flags','SID','Domain','Enabled']);
+
+        Object.values(adNodes).forEach(n => {
+            const { score, flags } = calcNodeRisk(n);
+            const p = n.props || {};
+            rows.push([
+                'Node',
+                n.name,
+                n.type,
+                score,
+                getRiskLabel(score),
+                [...new Set([...(n.riskFlags||[]),...flags])].join('; '),
+                p.objectsid || p.domainsid || '',
+                p.domain || '',
+                p.enabled != null ? String(p.enabled) : ''
+            ]);
+        });
+
+        rows.push([]);
+        rows.push(['Type','From','EdgeLabel','To','IsACL','RiskWeight','MITRE']);
+        adEdges.forEach(e => {
+            rows.push([
+                'Edge',
+                e.from,
+                e.label,
+                e.to,
+                e.isAcl ? 'true' : 'false',
+                e.riskWeight,
+                EDGE_MITRE[e.label] || ''
+            ]);
+        });
+
+        // ESC findings
+        const escs = detectADCS();
+        if (escs.length) {
+            rows.push([]);
+            rows.push(['Type','ESC','Template','Detail']);
+            escs.forEach(f => rows.push(['ADCS', f.esc, f.template, f.detail]));
+        }
+
+        const csvContent = rows.map(r =>
+            r.map(cell => {
+                const s = String(cell == null ? '' : cell).replace(/"/g, '""');
+                return s.includes(',') || s.includes('"') || s.includes('\n') ? `"${s}"` : s;
+            }).join(',')
+        ).join('\r\n');
+
+        const blob = new Blob(['\uFEFF' + csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = 'zhound-findings.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
     function clearGraph() {
         if (cy) { cy.destroy(); cy = null; }
         adNodes = {}; adEdges = []; foundPaths = []; ownedNodes = new Set();
-        loadErrors = []; unknownEdgeTypes = {}; sidIndex = {}; nameToSid = {};
+        loadErrors = []; unknownEdgeTypes = {}; sidIndex = {}; nameToSid = {}; gpoNames = {};
         activeFilters = { excludeTypes: new Set(), excludeDomains: new Set(), includeOUs: new Set(), includeGroups: new Set() };
         document.getElementById('zipInput').value      = '';
         document.getElementById('searchInput').value   = '';
