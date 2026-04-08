@@ -37,6 +37,8 @@ Built for pentesters, red teamers, and defenders who need fast, offline AD analy
 - Box-select, zoom, pan fully supported
 - Export PNG at 2× resolution; Export full edge list as CSV
 
+![screen2](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound2.png)
+
 ### Filters & Quick Views
 - Toggle: Hide Orphans, Structure edges (MemberOf/Contains/GPLink), ACL edges, Exec/Admin edges
 - Quick View filter per edge category: High-Risk ACLs, Privilege/Exec, Delegation, ADCS, Vulnerable Attributes
