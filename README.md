@@ -1,177 +1,193 @@
 # Z-Hound — Reforged
 
-> **Client-side Active Directory attack path visualizer for SharpHound / BloodHound data.**
-> No server. No install. Drop in a ZIP, get an interactive graph.
+> **Single-file, browser-based Active Directory attack graph tool for SharpHound collection data.**  
+> No server. No install. No Neo4j. Upload a ZIP, get an interactive attack graph.
 
-![Z-Hound Screenshot](https://raw.githubusercontent.com/zrnge/Z-Hound/refs/heads/main/Z-Hound.png)
+Built by [zrnge](https://www.github.com/zrnge)
 
 ---
 
 ## What is it?
 
-Z-Hound is a single-file web app that parses SharpHound collection ZIPs and renders an interactive attack graph of your Active Directory environment. It runs entirely in your browser — nothing leaves your machine.
+Z-Hound is a single HTML file that parses SharpHound ZIPs and renders an interactive attack graph of an Active Directory environment. Everything runs in your browser — no data ever leaves your machine.
 
-Built for pentesters, red teamers, and defenders who need fast, offline AD analysis without spinning up a Neo4j instance.
+Built for pentesters, red teamers, and defenders who need fast, offline AD analysis without spinning up a database.
 
 ---
 
 ## Features
 
-### Graph Engine
-- Powered by **Cytoscape.js** with Dagre, Force-Directed, Breadth-First, Concentric, and Grid layouts
-- Node size and border scale with **risk score** — the most dangerous objects stand out instantly
-- Node shapes by type: users `●`, computers `■`, domains `◆`, GPO/OU `⬡`, certs `★`
-- Pan, zoom, box-select, click-to-inspect
-- **Export PNG** — full graph at 2× resolution, dark background
+### Data Ingestion
+- Upload a **SharpHound ZIP** (all JSON files processed automatically) or individual JSON files
+- Supports SharpHound **v3 / v4 / v5** output formats
+- Handles both `{Results: [...]}` and direct-array session formats across SharpHound versions
+- Parses `Sessions`, `PrivilegedSessions`, and `RegistrySessions`
+- Resolves SIDs and GUIDs from both `Properties.objectsid` and `item.ObjectIdentifier`
+- Auto-synthesises well-known built-in domain groups (Domain Admins, Domain Controllers, Enterprise Admins, Schema Admins, etc.) that SharpHound does not explicitly collect
 
-![Z-Hound Screenshot](https://raw.githubusercontent.com/zrnge/Z-Hound/refs/heads/main/Z-Hound_domain_trust.png)
+### Graph Visualisation
+- Interactive graph powered by [Cytoscape.js](https://cytoscape.js.org/)
+- Five layout modes: **Concentric** (default), Hierarchical (Dagre), Breadth-First, Force-Directed, Grid
+- Node type colour coding: Users, Groups, Computers, Domains, OUs, GPOs, Cert Templates
+- Node size and border glow scale with **risk score** — the most dangerous objects stand out instantly
+- DCSync-capable principals render in red with a `DCSYNC` badge
+- Click any node to focus and reveal its neighbourhood
+- Box-select, zoom, pan fully supported
+- Export PNG at 2× resolution; Export full edge list as CSV
 
-### Risk Scoring Engine
-Every node is scored **0–100** automatically based on:
+### Filters & Quick Views
+- Toggle: Hide Orphans, Structure edges (MemberOf/Contains/GPLink), ACL edges, Exec/Admin edges
+- Quick View filter per edge category: High-Risk ACLs, Privilege/Exec, Delegation, ADCS, Vulnerable Attributes
+- Short / Full / Type-only label modes; SID overlay toggle
+- "Fit View" and "Clear Highlight" controls
+
+### Attack Path Analysis
+- **Find DA Path** — BFS shortest path from any selected node to Domain Admins
+- **All Paths** — enumerate every User → DA path in the dataset, sorted by hop count (Critical ≤2, High ≤4, Medium 5+)
+- Click any path row in the Paths panel to highlight it on the graph
+
+### Risk Scoring
+Every node is scored **0–100** automatically:
 
 | Flag | Score Impact |
 |---|---|
-| Unconstrained Delegation | +60 |
 | DCSync capability | +95 |
+| Unconstrained Delegation | +60 |
 | AS-REP Roastable | +45 |
 | Kerberoastable (SPN) | +40 |
 | SID History present | +35 |
-| AdminCount = 1 | +15 |
 | Password Never Expires | +20 |
+| AdminCount = 1 | +15 |
 | Account Disabled | −40 |
 
-### Attack Path Finding
-- **Find DA Path** — BFS shortest path from any object to Domain Admins
-- **All Paths** — enumerates every User → DA path in the dataset, sorted by hop count (Critical ≤2, High ≤4, Medium 5+)
-- Click any path in the panel to highlight it on the graph
-- Paths panel shows source → destination with hop count badge
+### Risk Detection
+- **DCSync** — `GetChanges` + `GetChangesAll` or `AllExtendedRights` on the domain object
+- **Kerberoastable** — `hasspn = true`, account enabled
+- **AS-REP Roastable** — `dontreqpreauth = true`
+- **Unconstrained Delegation** — computers with unrestricted delegation
+- **Critical ACLs** — `GenericAll`, `WriteDacl`, `WriteOwner`, `Owns`, `AllExtendedRights` on high-value targets
+- **SID History** abuse paths
 
-### DCSync Auto-Detection
-Automatically identifies principals that can perform a DCSync attack:
-- `GetChanges` + `GetChangesAll` on a Domain object
-- `AllExtendedRights` on a Domain object
+### Node Details Panel (BloodHound-style)
 
-Flagged nodes render in **red** with a `DCSYNC` badge.
+**Computer nodes:**
+- Local Admins (Explicit / Unrolled / Foreign)
+- Inbound Execution Rights — RDP / DCOM (direct and group-delegated)
+- SQL Admins
+- Active Sessions *(clickable — shows session paths in Paths panel)*
 
-### Node Details Panel
-Click any node to see:
-- Full properties: SID, DN, domain, enabled status, last logon, password last set, OS, email, description
-- SPN list (Kerberoastable targets)
-- SID History entries
-- All incoming and outgoing edges with clickable neighbors
-- Risk flags and score breakdown
+**User nodes:**
+- Sessions logons observed *(clickable — shows which computers)*
+- Sibling objects in same OU
+- Reachable High Value Targets *(clickable)*
+- Effective Inbound GPOs
+- Outbound Object Control (first-degree and group-delegated)
+- Inbound Control Rights (explicit and unrolled)
+- Kerberoastable / AS-REP Roastable / Unconstrained Delegation / SID History flags
 
-### Risk Report Panel
-Ranked attack surface overview:
-- DCSync principals
-- Critical ACLs (GenericAll / WriteDacl / WriteOwner)
-- Kerberoastable accounts
-- AS-REP Roastable accounts
-- Unconstrained Delegation targets
-- SID History accounts
-- Top 25 highest-risk nodes
+**Group nodes:**
+- Sessions of group members *(clickable)*
+- Reachable High Value Targets *(clickable)*
+- Direct / Transitive / Foreign members *(clickable)*
+- Execution Rights (RDP / DCOM — direct and group-delegated)
+- Outbound Object Control
+- Inbound Control Rights
+
+**OU nodes:**
+- Direct and inherited Affecting GPOs
+- Contained users, computers, groups, child OUs *(all clickable)*
+
+**Domain nodes:**
+- Trusts, DCSync-capable principals *(clickable)*
+- Cert Templates and ADCS exposure
 
 ### Stats Bar
-Live metrics on data load:
-
+Live metrics shown on data load:
 ```
-Objects | Edges | Kerberoastable | AS-REP | DCSync Risk | Critical ACLs | Paths to DA
+Objects | Edges | Kerberoastable | AS-REP | DCSync Risk | Critical ACLs | Unconstrained Deleg | Cert Templates | Paths to DA
 ```
-
-### Quick Views
-Dynamically generated from your data:
-
-- **Special Analysis** — DCSync Principals, High Value Targets
-- **High-Risk ACLs** — GenericAll, WriteDacl, WriteOwner, AddKeyCredentialLink, ForceChangePassword, ReadLAPSPassword…
-- **Privilege & Exec** — AdminTo, CanRDP, ExecuteDCOM, CanPSRemote, SQLAdmin, GetChangesAll
-- **Delegation & Trust** — AllowedToDelegate, AllowedToAct, TrustedBy
-- **ADCS** — Enroll, ManageCA, ManageCertificates
-- **Vulnerable Attributes** — Kerberoastable, AS-REP, Unconstrained Delegation, SID History, AdminCount…
-
----
-
-## Supported Data Formats
-
-| Format | Support |
-|---|---|
-| SharpHound ZIP (v2/v3) | ✅ Full |
-| BloodHound v4/v5 JSON (`graph.nodes` / `graph.edges`) | ✅ Full |
-| Raw BloodHound JSON files | ✅ Full |
-| Multiple files at once | ✅ Drop multiple ZIPs/JSONs |
-
-Parsed file types: `users`, `groups`, `computers`, `domains`, `gpos`, `ous`, `certtemplates`, `containers`
-
----
-
-## Edge Types Recognized
-
-| Category | Edges |
-|---|---|
-| Membership | MemberOf |
-| ACL | GenericAll, WriteDacl, WriteOwner, Owns, ForceChangePassword, AddMember, AddKeyCredentialLink, ReadLAPSPassword, AllExtendedRights, GenericWrite, WriteProperty, AddSelf, WriteAccountRestrictions |
-| Execution | AdminTo, CanRDP, ExecuteDCOM, CanPSRemote, SQLAdmin, HasSession, CanAbuseGPO |
-| Delegation | AllowedToDelegate, AllowedToAct |
-| DCSync | GetChanges, GetChangesAll |
-| ADCS | Enroll, ManageCA, ManageCertificates |
-| GPO | GPLink |
-| Trust | TrustedBy |
-
-Unknown/new edge types are caught automatically and added to Quick Views.
 
 ---
 
 ## Usage
 
 1. **Open** `Z-Hound.html` in any modern browser (Chrome, Firefox, Edge)
-2. **Click** `Upload ZIP / JSON` and select your SharpHound collection
+2. **Click** `Upload ZIP / JSON` and select your SharpHound collection (ZIP recommended)
 3. **Explore** — the graph renders automatically
-4. **Click a node** to inspect its properties and risk flags
-5. **Search** for a user and hit `Find DA Path` to trace the attack path
-6. **Hit `All Paths`** to enumerate every route to Domain Admins
-7. **Use Quick Views** to isolate specific attack vectors
-8. **Export PNG** when done
+4. **Click a node** to inspect its properties, risk flags, and BloodHound-style stats
+5. **Search** for a user/computer and hit **Find DA Path** to trace the shortest attack path
+6. **Hit All Paths** to enumerate every route to Domain Admins
+7. **Use Quick Views** to isolate specific attack vectors (ACLs, Delegation, ADCS…)
+8. **Export PNG / CSV** when done
 
-> Nothing is sent to any server. All processing happens in your browser.
+> No data is ever sent to any server. All processing happens entirely in your browser.
 
 ---
 
-## Filters & Controls
+## Edge Types Recognized
 
-| Control | Description |
+| Category | Edge Labels |
 |---|---|
-| Hide Orphans | Remove nodes with no visible connections |
-| MemberOf | Toggle group membership edges |
-| ACLs | Toggle all ACL/permission edges |
-| Exec/Admin | Toggle AdminTo, RDP, DCOM, PSRemote edges |
-| Layout | Switch between 5 graph layout algorithms |
-| Labels | Short name / Full name / Type only |
-| Fit View | Reset zoom and pan to fit all nodes |
-| Clear Highlight | Remove path highlights |
+| Membership / Structure | MemberOf, Contains, GPLink |
+| ACL | GenericAll, WriteDacl, WriteOwner, Owns, ForceChangePassword, AddMember, AddKeyCredentialLink, ReadLAPSPassword, AllExtendedRights, GenericWrite, WriteProperty, AddSelf, WriteAccountRestrictions |
+| Execution | AdminTo, CanRDP, ExecuteDCOM, CanPSRemote, SQLAdmin, HasSession, CanAbuseGPO |
+| Delegation | AllowedToDelegate, AllowedToAct |
+| DCSync | GetChanges, GetChangesAll |
+| ADCS | Enroll, ManageCA, ManageCertificates |
+| Trust | TrustedBy |
+
+Unknown edge types are caught automatically and added to Quick Views.
+
+---
+
+## Supported SharpHound File Types
+
+| File pattern | Content |
+|---|---|
+| `*computers*.json` | Computer objects, sessions, local admins |
+| `*users*.json` | User objects, SPNs, properties |
+| `*groups*.json` | Group memberships |
+| `*domains*.json` | Domain trusts, ACLs |
+| `*ous*.json` | Organisational unit structure, GPLinks |
+| `*gpos*.json` | Group Policy Objects |
+| `*containers*.json` | Container objects |
+| `*certtemplates*.json` / `*cas*.json` | ADCS certificate templates |
+
+---
+
+## Tech Stack
+
+| Library | Version | Purpose |
+|---|---|---|
+| [Cytoscape.js](https://cytoscape.js.org/) | 3.28.1 | Graph rendering |
+| [cytoscape-dagre](https://github.com/cytoscape/cytoscape.js-dagre) | 2.5.0 | Hierarchical layout |
+| [dagre](https://github.com/dagrejs/dagre) | 0.8.5 | Layout engine |
+| [JSZip](https://stuk.github.io/jszip/) | 3.10.1 | Client-side ZIP extraction |
+| [Tailwind CSS](https://tailwindcss.com/) | CDN | Styling |
+
+Single HTML file — no build step, no backend, no framework.
 
 ---
 
 ## Requirements
 
 - A modern browser (Chrome 90+, Firefox 88+, Edge 90+)
-- A SharpHound collection ZIP or BloodHound JSON export
-- No internet connection required after first load (all libraries are CDN-loaded once)
+- Internet connection on first load (CDN scripts loaded once, then cached)
+- SharpHound collection output — ZIP or individual JSON files
 
 ---
 
-## Tech Stack
+## Known Limitations
 
-| Library | Purpose |
-|---|---|
-| [Cytoscape.js](https://cytoscape.org/) | Graph rendering and interaction |
-| [Cytoscape-Dagre](https://github.com/cytoscape/cytoscape.js-dagre) | Hierarchical layout engine |
-| [JSZip](https://stuk.github.io/jszip/) | Client-side ZIP parsing |
-| [Tailwind CSS](https://tailwindcss.com/) | UI styling |
+- Large datasets (>50k edges) may slow the browser — use Quick View filters to scope the graph
+- Foreign domain objects may appear as unresolved SIDs if their JSON files are not included in the upload
+- Deleted or non-collected accounts remain as SID-only ghost nodes with an advisory notice
 
 ---
 
 ## Disclaimer
 
-Z-Hound is intended for **authorized security assessments, penetration testing, and defensive security work only**. Only use it against environments you have explicit written permission to test. The authors are not responsible for misuse.
+Z-Hound is intended for **authorized security assessments, penetration testing, and defensive security work only**. Only use it against environments you have explicit written permission to test.
 
 ---
 
