@@ -518,6 +518,14 @@
                 if (adNodes[name].type === 'Unknown') adNodes[name].type = detectedType;
             }
 
+            // Store ObjectIdentifier as secondary resolution key (_oid).
+            // SharpHound uses item.ObjectIdentifier (SID or GUID) as the canonical ID
+            // in all relationship arrays, but Properties.objectsid may be absent or differ.
+            const oid = (item.ObjectIdentifier || '').toUpperCase();
+            if (oid && oid !== name) {
+                adNodes[name].props._oid = oid;
+            }
+
             const addEdge = (from, to, label, isAcl = false) => {
                 from = from.toUpperCase();
                 to   = to.toUpperCase();
@@ -571,9 +579,14 @@
                 }
             });
 
-            // Sessions
+            // Sessions (SharpHound v3/v4: UserSID; v5: UserSID or ObjectIdentifier)
             (item.Sessions?.Results || []).forEach(s => {
-                const user = (s.UserSID || s.UserId || '').toUpperCase();
+                const user = (s.UserSID || s.UserId || s.User || s.ObjectIdentifier || '').toUpperCase();
+                if (user) addEdge(name, user, 'HasSession', false);
+            });
+            // PrivilegedSessions (some CE collectors)
+            (item.PrivilegedSessions?.Results || []).forEach(s => {
+                const user = (s.UserSID || s.UserId || s.User || s.ObjectIdentifier || '').toUpperCase();
                 if (user) addEdge(name, user, 'HasSession', false);
             });
 
@@ -623,14 +636,17 @@
     // SID RESOLUTION
     // ================================================================
     function resolveEdges() {
-        // SharpHound stores relationships using SIDs but names the node by display-name.
-        // Build a SID -> display-name map, then remap every edge endpoint.
+        // SharpHound stores relationships using SIDs/GUIDs but names nodes by display-name.
+        // Build a unified lookup: SID/GUID → display-name key.
+        // Priority order: props.objectsid → props._oid (item.ObjectIdentifier stored during parse)
         const sidMap = {};
         for (const [key, node] of Object.entries(adNodes)) {
             const sid = (node.props?.objectsid || node.props?.domainsid || '').toUpperCase();
             if (sid && sid !== key && !sidMap[sid]) sidMap[sid] = key;
+            // ObjectIdentifier (canonical SID or GUID) stored during parsing
+            const oid = (node.props?._oid || '').toUpperCase();
+            if (oid && oid !== key && !sidMap[oid]) sidMap[oid] = key;
         }
-        if (!Object.keys(sidMap).length) return;
 
         for (const edge of adEdges) {
             for (const side of ['from', 'to']) {
@@ -671,13 +687,17 @@
         nameToSid = {};
         for (const [key, node] of Object.entries(adNodes)) {
             const sid = (node.props?.objectsid || node.props?.domainsid || '').toUpperCase();
-            if (sid) {
-                sidIndex[sid]  = key;
-                nameToSid[key] = sid;
+            const oid = (node.props?._oid || '').toUpperCase();
+            // Prefer props.objectsid; fall back to ObjectIdentifier
+            const canonical = sid || oid;
+            if (canonical) {
+                sidIndex[canonical] = key;
+                nameToSid[key]      = canonical;
+                // Also index the secondary identifier if both exist
+                if (sid && oid && sid !== oid) sidIndex[oid] = key;
             }
-            // Ghost/unresolved nodes: their key IS the SID (e.g. "S-1-5-21-...")
-            // Record them too so the label toggle works for every node
-            if (!sid && /^S-1-/i.test(key)) {
+            // Ghost/unresolved nodes: key IS the SID
+            if (!canonical && /^S-1-/i.test(key)) {
                 nameToSid[key] = key;
             }
         }
@@ -1586,6 +1606,34 @@
         renderPathsPanel(); switchTab('paths');
     }
 
+    function buildMemberLookup(groupId) {
+        // Returns a Set of node keys AND their SIDs for all transitive members of a group.
+        // Used so session/RDP/etc. edges that reference a member by SID still match.
+        const { all } = getTransitiveGroupMembers(groupId);
+        const lookup = new Set(all);
+        all.forEach(mid => {
+            const sid = (adNodes[mid]?.props?.objectsid || adNodes[mid]?.props?._oid || '').toUpperCase();
+            if (sid) lookup.add(sid);
+            // If the key itself is a SID (unresolved ghost), it's already in lookup via all
+        });
+        return { all, lookup };
+    }
+
+    function quickGroupSessions(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        const { lookup } = buildMemberLookup(nodeId);
+        // HasSession: Computer —[HasSession]→ User (by display name or SID)
+        const sessEdges = adEdges.filter(e => e.label === 'HasSession' && lookup.has(e.to));
+        foundPaths = sessEdges.slice(0, 100).map(e => ({
+            from: e.from,
+            path: { nodes: [e.from, e.to], edges: ['HasSession'] },
+            hops: 1,
+            queryLabel: 'Session: ' + (adNodes[e.to]?.name.split('@')[0] || e.to)
+        }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
     function showNodeDetails(nodeId) {
         const n = adNodes[nodeId];
         if (!n) return;
@@ -1615,9 +1663,11 @@
                         class="bg-gray-700 hover:bg-gray-600 text-xs px-2 py-1 rounded transition">Search SID</button>
                 </div>
                 <div class="text-gray-500 text-xs leading-relaxed">
-                    This principal has active relationships but its identity was not found in the
-                    uploaded data. Upload the <span class="text-gray-300">users.json</span> or
-                    <span class="text-gray-300">groups.json</span> that contains this SID to resolve it.
+                    This SID has active relationships but no matching object was found in the uploaded data.
+                    Likely causes: <span class="text-gray-300">foreign/trusted domain principal</span>,
+                    a <span class="text-gray-300">deleted account</span>, or a well-known built-in SID
+                    not collected by SharpHound. If this is an internal account, ensure the correct
+                    collection ZIP was uploaded (all files included).
                 </div>
             </div>`;
         }
@@ -1662,13 +1712,15 @@
             html += renderOverviewRow('Functional Level', n.props?.functionallevel || n.props?.domainFunctionalityLevel || '—', null);
 
         } else if (n.type === 'Group') {
-            const { direct, all } = getTransitiveGroupMembers(nodeId);
+            const { direct } = getTransitiveGroupMembers(nodeId);
+            const { all, lookup } = buildMemberLookup(nodeId);
             const memberships = getTransitiveMemberships(nodeId);
             const hvts    = getReachableHVTs(nodeId);
-            const sessions= adEdges.filter(e => e.from === nodeId && e.label === 'HasSession').length;
+            // HasSession: Computer → User; match by display name OR SID via lookup
+            const sessions= adEdges.filter(e => e.label === 'HasSession' && lookup.has(e.to)).length;
             const foreign  = getForeignMembers(nodeId);
             const gtok = nodeToken(nodeId);
-            html += renderOverviewRow('Sessions',              sessions,      null);
+            html += renderOverviewRow('Sessions',              sessions,      sessions > 0 ? `quickGroupSessions('${gtok}')` : null);
             html += renderOverviewRow('Reachable High Value Targets', hvts,  null);
             html += `<div class="border-t border-gray-700/40 mt-0.5 pt-0.5">`;
             html += renderOverviewRow('Direct Members',        direct.size,   `quickGroupMembers('${gtok}')`);
