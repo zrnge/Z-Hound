@@ -72,6 +72,8 @@ Every node is scored **0–100** automatically:
 - **Critical ACLs** — `GenericAll`, `WriteDacl`, `WriteOwner`, `Owns`, `AllExtendedRights` on high-value targets
 - **SID History** abuse paths
 
+![](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound4.png)
+
 ### Node Details Panel (BloodHound-style)
 
 **Computer nodes:**
@@ -112,6 +114,8 @@ Objects | Edges | Kerberoastable | AS-REP | DCSync Risk | Critical ACLs | Uncons
 ```
 
 ---
+
+![](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound3.png)
 
 ## Usage
 
