@@ -124,7 +124,7 @@
             <option value="dagre">Hierarchical</option>
             <option value="breadthfirst">Breadth-First</option>
             <option value="cose">Force-Directed</option>
-            <option value="concentric">Concentric</option>
+            <option value="concentric" selected>Concentric</option>
             <option value="grid">Grid</option>
         </select>
 
@@ -188,6 +188,25 @@
             <div id="statusMessage" class="absolute inset-0 flex items-center justify-center text-gray-600 pointer-events-none font-semibold text-center px-10 text-sm">
                 Upload a SharpHound ZIP or JSON file to begin
             </div>
+
+            <!-- Developer credit -->
+            <a href="https://www.github.com/zrnge" target="_blank" rel="noopener"
+               class="absolute bottom-4 right-4 z-10 flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-300 transition select-none"
+               title="Built by zrnge">
+                <svg class="w-3.5 h-3.5 shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                    <path d="M12 0C5.37 0 0 5.37 0 12c0 5.303 3.438 9.8 8.205 11.387.6.113.82-.258.82-.577
+                        0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.757-1.333-1.757
+                        -1.089-.745.083-.729.083-.729 1.205.084 1.84 1.237 1.84 1.237 1.07 1.834 2.807 1.304
+                        3.492.997.108-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931
+                        0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322
+                        3.301 1.23A11.509 11.509 0 0112 5.803c1.02.005 2.047.138 3.006.404
+                        2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84
+                        1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.922.43.372.823 1.102.823
+                        2.222 0 1.606-.015 2.898-.015 3.293 0 .322.216.694.825.576C20.565 21.796
+                        24 17.303 24 12 24 5.37 18.627 0 12 0z"/>
+                </svg>
+                <span>zrnge</span>
+            </a>
 
             <!-- Legend -->
             <div class="absolute bottom-4 left-4 bg-panel border border-gray-700 rounded p-2.5 text-xs text-gray-300 z-10 shadow-lg">
@@ -579,15 +598,17 @@
                 }
             });
 
-            // Sessions (SharpHound v3/v4: UserSID; v5: UserSID or ObjectIdentifier)
-            (item.Sessions?.Results || []).forEach(s => {
-                const user = (s.UserSID || s.UserId || s.User || s.ObjectIdentifier || '').toUpperCase();
-                if (user) addEdge(name, user, 'HasSession', false);
+            // Sessions — handle both {Results:[...]} and direct array formats across SH versions
+            const _sessList = (src) => Array.isArray(src) ? src : (src?.Results || []);
+            const _sesUser  = (s)   => (s.UserSID || s.UserId || s.User || s.ObjectIdentifier || '').toUpperCase();
+            _sessList(item.Sessions).forEach(s => {
+                const user = _sesUser(s); if (user) addEdge(name, user, 'HasSession', false);
             });
-            // PrivilegedSessions (some CE collectors)
-            (item.PrivilegedSessions?.Results || []).forEach(s => {
-                const user = (s.UserSID || s.UserId || s.User || s.ObjectIdentifier || '').toUpperCase();
-                if (user) addEdge(name, user, 'HasSession', false);
+            _sessList(item.PrivilegedSessions).forEach(s => {
+                const user = _sesUser(s); if (user) addEdge(name, user, 'HasSession', false);
+            });
+            _sessList(item.RegistrySessions).forEach(s => {
+                const user = _sesUser(s); if (user) addEdge(name, user, 'HasSession', false);
             });
 
             // Domain trusts
@@ -677,6 +698,102 @@
             seen.add(k);
             return true;
         });
+    }
+
+    // ================================================================
+    // WELL-KNOWN RID RESOLUTION
+    // ================================================================
+    const WELL_KNOWN_RIDS = {
+        '498': { name: 'Enterprise Read-Only Domain Controllers', type: 'Group', isAdmin: false },
+        '500': { name: 'Administrator',                           type: 'User',  isAdmin: true  },
+        '501': { name: 'Guest',                                   type: 'User',  isAdmin: false },
+        '502': { name: 'KRBTGT',                                  type: 'User',  isAdmin: false },
+        '512': { name: 'Domain Admins',                           type: 'Group', isAdmin: true  },
+        '513': { name: 'Domain Users',                            type: 'Group', isAdmin: false },
+        '514': { name: 'Domain Guests',                           type: 'Group', isAdmin: false },
+        '515': { name: 'Domain Computers',                        type: 'Group', isAdmin: false },
+        '516': { name: 'Domain Controllers',                      type: 'Group', isAdmin: false },
+        '517': { name: 'Cert Publishers',                         type: 'Group', isAdmin: false },
+        '518': { name: 'Schema Admins',                           type: 'Group', isAdmin: true  },
+        '519': { name: 'Enterprise Admins',                       type: 'Group', isAdmin: true  },
+        '520': { name: 'Group Policy Creator Owners',             type: 'Group', isAdmin: false },
+        '521': { name: 'Read-Only Domain Controllers',            type: 'Group', isAdmin: false },
+        '522': { name: 'Cloneable Domain Controllers',            type: 'Group', isAdmin: false },
+        '525': { name: 'Protected Users',                         type: 'Group', isAdmin: false },
+        '526': { name: 'Key Admins',                              type: 'Group', isAdmin: false },
+        '527': { name: 'Enterprise Key Admins',                   type: 'Group', isAdmin: false },
+        '553': { name: 'RAS and IAS Servers',                     type: 'Group', isAdmin: false },
+        '571': { name: 'Allowed RODC Password Replication Group', type: 'Group', isAdmin: false },
+        '572': { name: 'Denied RODC Password Replication Group',  type: 'Group', isAdmin: false },
+    };
+
+    function resolveWellKnownSIDs() {
+        // Build map: domainSIDprefix (uppercase) → domain display name
+        // Domain nodes have their own SID (without a RID) stored in _oid or objectsid.
+        const domainPrefixMap = {};
+        for (const [key, node] of Object.entries(adNodes)) {
+            if (node.type !== 'Domain') continue;
+            const sid = (node.props?._oid || node.props?.objectsid || node.props?.domainsid || '').toUpperCase();
+            if (sid) domainPrefixMap[sid] = node.name; // e.g. "INLANEFREIGHT.HTB"
+        }
+        if (!Object.keys(domainPrefixMap).length) return;
+
+        const toRename = [];
+        for (const [key, node] of Object.entries(adNodes)) {
+            if (!/^S-1-/i.test(key) || node.type !== 'Unknown') continue;
+            const parts = key.split('-');
+            const rid   = parts[parts.length - 1];
+            if (!WELL_KNOWN_RIDS[rid]) continue;
+
+            // Domain SID prefix is everything except the last component
+            const prefix   = parts.slice(0, -1).join('-');
+            const domainName = domainPrefixMap[prefix];
+            if (!domainName) continue;
+
+            const info    = WELL_KNOWN_RIDS[rid];
+            // Normalise domain suffix: use just the FQDN part (after @, or the whole name)
+            const fqdn    = domainName.includes('@') ? domainName.split('@')[1] : domainName;
+            const newKey  = `${info.name.toUpperCase()}@${fqdn}`;
+
+            toRename.push({ oldKey: key, newKey, info });
+        }
+
+        toRename.forEach(({ oldKey, newKey, info }) => {
+            const ghost = adNodes[oldKey];
+            if (adNodes[newKey]) {
+                // Merge ghost into existing node
+                const real = adNodes[newKey];
+                if (ghost.isAdmin || info.isAdmin) real.isAdmin = true;
+                if (ghost.canDCSync) real.canDCSync = true;
+                if (ghost.riskFlags?.length)
+                    real.riskFlags = [...new Set([...(real.riskFlags || []), ...ghost.riskFlags])];
+            } else {
+                // Rename ghost to proper well-known name
+                ghost.name    = newKey;
+                ghost.type    = info.type;
+                ghost.isAdmin = ghost.isAdmin || info.isAdmin;
+                adNodes[newKey] = ghost;
+            }
+            delete adNodes[oldKey];
+
+            // Remap all edges
+            for (const e of adEdges) {
+                if (e.from === oldKey) e.from = newKey;
+                if (e.to   === oldKey) e.to   = newKey;
+            }
+        });
+
+        if (toRename.length > 0) {
+            // Re-deduplicate after rename
+            const seen = new Set();
+            adEdges = adEdges.filter(e => {
+                if (!e.from || !e.to || e.from === e.to) return false;
+                const k = `${e.from}__${e.to}__${e.label}`;
+                if (seen.has(k)) return false;
+                seen.add(k);
+                return true;
+            });
+        }
     }
 
     // ================================================================
@@ -1634,6 +1751,37 @@
         renderPathsPanel(); switchTab('paths');
     }
 
+    function quickComputerSessions(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        // HasSession: Computer —[HasSession]→ User
+        const sessEdges = adEdges.filter(e => e.from === nodeId && e.label === 'HasSession');
+        foundPaths = sessEdges.slice(0, 100).map(e => ({
+            from: nodeId,
+            path: { nodes: [nodeId, e.to], edges: ['HasSession'] },
+            hops: 1,
+            queryLabel: 'Session: ' + (adNodes[e.to]?.name?.split('@')[0] || e.to)
+        }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
+    function quickUserSessions(tok) {
+        const nodeId = _nodeTokens[tok];
+        if (!nodeId) return;
+        // HasSession: Computer —[HasSession]→ User  (we want computers that have this user)
+        const nodeKey  = nodeId;
+        const nodeSid  = (adNodes[nodeId]?.props?.objectsid || adNodes[nodeId]?.props?._oid || '').toUpperCase();
+        const sessEdges = adEdges.filter(e => e.label === 'HasSession' &&
+            (e.to === nodeKey || (nodeSid && e.to === nodeSid)));
+        foundPaths = sessEdges.slice(0, 100).map(e => ({
+            from: e.from,
+            path: { nodes: [e.from, nodeId], edges: ['HasSession'] },
+            hops: 1,
+            queryLabel: 'Session on: ' + (adNodes[e.from]?.name?.split('.')[0] || e.from)
+        }));
+        renderPathsPanel(); switchTab('paths');
+    }
+
     function showNodeDetails(nodeId) {
         const n = adNodes[nodeId];
         if (!n) return;
@@ -1755,7 +1903,7 @@
             html += renderOverviewRow('First Degree DCOM Users',      dcomDirect - dcomGroup, null);
             html += renderOverviewRow('Group Delegated DCOM Users',   dcomGroup,            null);
             html += renderOverviewRow('SQL Admins',                   sqlAdmins,            null);
-            html += renderOverviewRow('Active Sessions',              sessions,             null);
+            html += renderOverviewRow('Active Sessions',              sessions,             sessions > 0 ? `quickComputerSessions('${ctok}')` : null);
 
         } else if (n.type === 'User') {
             const hvts     = getReachableHVTs(nodeId);
@@ -1764,7 +1912,7 @@
             const gpos     = getEffectiveGPOs(nodeId);
             const memberships = getTransitiveMemberships(nodeId);
             const utok = nodeToken(nodeId);
-            html += renderOverviewRow('Sessions (logons observed)',    sessions, null);
+            html += renderOverviewRow('Sessions (logons observed)',    sessions, sessions > 0 ? `quickUserSessions('${utok}')` : null);
             html += renderOverviewRow('Sibling Objects in Same OU',   siblings, null);
             html += renderOverviewRow('Reachable High Value Targets',  hvts,    `quickReachableHVTs('${utok}')`);
             html += renderOverviewRow('Effective Inbound GPOs',        gpos,    null);
@@ -2933,6 +3081,7 @@
         }
 
         resolveEdges();
+        resolveWellKnownSIDs();
         buildSidIndex();
         detectDCSync();
         computeStats();
