@@ -1,5 +1,6 @@
 # Z-Hound — Reforged
 
+![License](https://img.shields.io/badge/License-MIT-green)
 ![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
 
 > **Single-file, browser-based Active Directory attack graph tool for SharpHound collection data.**  
