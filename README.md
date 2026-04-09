@@ -1,5 +1,7 @@
 # Z-Hound — Reforged
 
+![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+
 > **Single-file, browser-based Active Directory attack graph tool for SharpHound collection data.**  
 > No server. No install. No Neo4j. Upload a ZIP, get an interactive attack graph.
 
