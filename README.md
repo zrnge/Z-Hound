@@ -33,6 +33,8 @@ Built for pentesters, red teamers, and defenders who need fast, offline AD analy
 
 ---
 
+![Screen1](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound1.png)
+
 ## Quick Start
 
 | Option | Steps |
@@ -64,7 +66,7 @@ Built for pentesters, red teamers, and defenders who need fast, offline AD analy
 - Click any node to focus and reveal its neighbourhood
 - Box-select, zoom (0.02×–12×), full pan support
 - Short / Full / Type-only label modes; SID overlay toggle
-
+![Screen2](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound1.png)
 ### Filters & Quick Views
 - Toggle: Hide Orphans, Structure edges, ACL edges, Exec/Admin edges
 - **Quick View dropdown** with auto-built categories:
@@ -103,6 +105,8 @@ Built for pentesters, red teamers, and defenders who need fast, offline AD analy
 - **All Paths** — enumerate every User/Computer → DA path, sorted by hop count (Critical ≤2 hops, High ≤4, Medium 5+)
 - Click any path row to highlight it on the graph in red
 
+![Screen3](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound1.png)
+
 ### Risk Scoring
 Every node is scored **0–100** automatically:
 
@@ -133,6 +137,8 @@ Every node is scored **0–100** automatically:
 - **NTLM Relay Target** — `signing = false` or `signingrequired = false` on computer objects
 - **WebClient Running** — `webclient = true` on computer objects (HTTP coerce surface)
 - **SMBv1 Enabled** — `smb1enabled = true`
+
+![Screen4](https://github.com/zrnge/Z-Hound/blob/main/Screens/zhound1.png)
 
 ### NTLM Relay Path Analysis
 When SharpHound collects SMB signing and WebClient properties:
