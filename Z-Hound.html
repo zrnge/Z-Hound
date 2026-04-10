@@ -282,7 +282,9 @@
         AZPrivilegedRoleAdmin:90, AZResetPassword:80, AZUserAccessAdmin:85,
         AZVMAdminLogin:80, AZVMContributor:70,
         // Misc CE edges
-        SyncedToEntraUser:40, HostsCAService:60
+        SyncedToEntraUser:40, HostsCAService:60,
+        // Targeted Kerberoasting
+        SPNTarget:55
     };
 
     const HIGH_RISK_ACLS = new Set([
@@ -364,6 +366,7 @@
         AZHasRole:      'Holds an Azure RBAC role on a resource.',
         SyncedToEntraUser: 'On-premises AD account synced to Entra ID (Azure AD).',
         HostsCAService: 'Computer hosts the Active Directory Certificate Services CA role.',
+        SPNTarget: 'This service account has an SPN targeting this computer — Kerberoastable against this specific service.',
     };
 
     const EDGE_MITRE = {
@@ -410,6 +413,7 @@
         AZExecuteCommand:   'T1651 – Cloud Administration Command',
         AZVMAdminLogin:     'T1078.004 – Valid Accounts: Cloud Accounts',
         AZGetSecrets:       'T1552.001 – Unsecured Credentials',
+        SPNTarget:          'T1558.003 – Steal or Forge Kerberos Tickets: Kerberoasting',
     };
 
     const EXEC_EDGES = new Set([
@@ -436,6 +440,7 @@
         if (p.sidhistory && p.sidhistory.length > 0) { score += 35; flags.push('SID History'); }
         if (p.dontexpirepassword)                    { score += 10; }
         if (p.enabled === false)                     { score -= 40; flags.push('Disabled'); }
+        if (p.isdeleted)                             { score -= 50; flags.push('Deleted'); }
         if (node.isAdmin)                            { score += 50; }
         if (node.canDCSync)                          { score += 95; }
 
@@ -545,6 +550,10 @@
                 adNodes[name].props._oid = oid;
             }
 
+            // Top-level flags not present in Properties block
+            if (item.IsACLProtected != null) adNodes[name].props.isaclprotected = item.IsACLProtected;
+            if (item.IsDeleted      != null) adNodes[name].props.isdeleted      = item.IsDeleted;
+
             const addEdge = (from, to, label, isAcl = false) => {
                 from = from.toUpperCase();
                 to   = to.toUpperCase();
@@ -579,6 +588,38 @@
             parseArr(item.AllowedToEnroll,  'Enroll',            true);
             parseArr(item.SQLAdmins,        'SQLAdmin',          true);
             parseArr(item.ChildObjects,     'Contains',          false);
+
+            // GPOChanges: GPO-applied rights present on OU/Domain nodes
+            if (item.GPOChanges) {
+                const gc       = item.GPOChanges;
+                const affected = (gc.AffectedComputers || [])
+                    .map(c => (c.ObjectIdentifier || '').toUpperCase()).filter(Boolean);
+                if (affected.length) {
+                    const _gcArr = (arr) => Array.isArray(arr) ? arr : (arr?.Results || []);
+                    const _gcEdges = (arr, label) => _gcArr(arr).forEach(p => {
+                        const pid = (p.ObjectIdentifier || '').toUpperCase();
+                        if (pid) affected.forEach(cid => addEdge(pid, cid, label, false));
+                    });
+                    _gcEdges(gc.LocalAdmins,       'AdminTo');
+                    _gcEdges(gc.RemoteDesktopUsers, 'CanRDP');
+                    _gcEdges(gc.DcomUsers,          'ExecuteDCOM');
+                    _gcEdges(gc.PSRemoteUsers,      'CanPSRemote');
+                }
+            }
+
+            // PrimaryGroupSID: implicit group membership not expressed as an explicit MemberOf edge
+            if (item.PrimaryGroupSID) {
+                const pgSid = item.PrimaryGroupSID.toUpperCase();
+                if (pgSid) addEdge(name, pgSid, 'MemberOf', false);
+            }
+
+            // SPNTargets: targeted Kerberoasting — service account can impersonate these targets
+            if (Array.isArray(item.SPNTargets)) {
+                item.SPNTargets.forEach(t => {
+                    const tid = (t.ComputerSID || t.ObjectIdentifier || '').toUpperCase();
+                    if (tid) addEdge(name, tid, 'SPNTarget', false);
+                });
+            }
 
             // Capture GPO friendly name for GUID resolution
             if (detectedType === 'GPO' && props.name) {
@@ -1018,6 +1059,7 @@
         if (label === 'MemberOf')                                                          return '#4a5568';
         if (label === 'Contains')                                                          return '#2c3e50';
         if (label === 'HasSession')                                                        return '#2980b9';
+        if (label === 'SPNTarget')                                                         return '#d4ac0d';
         if (isAcl)                                                                         return '#f39c12';
         return '#6b7280';
     }
@@ -1328,7 +1370,7 @@
         const cats = {
             'High-Risk ACLs':     ['GenericAll','WriteDacl','WriteOwner','Owns','ForceChangePassword','AddMember','ReadLAPSPassword','AddKeyCredentialLink','AllExtendedRights','GenericWrite','AddSelf'],
             'Privilege & Exec':   ['AdminTo','CanRDP','ExecuteDCOM','CanPSRemote','SQLAdmin','HasSession','GetChangesAll','GetChanges'],
-            'Delegation & Trust': ['AllowedToDelegate','AllowedToAct','TrustedBy'],
+            'Delegation & Trust': ['AllowedToDelegate','AllowedToAct','TrustedBy','SPNTarget'],
             'ADCS':               ['Enroll','ManageCA','ManageCertificates','CanAbuseGPO'],
             'GPO':                ['GPLink']
         };
@@ -1359,6 +1401,8 @@
             { prop: 'admincount',            label: 'AdminCount = 1' },
             { prop: 'sidhistory',            label: 'Has SID History' },
             { prop: 'enabled',               label: 'Enabled Accounts' },
+            { prop: 'isaclprotected',        label: 'ACL Protected (Inheritance Blocked)' },
+            { prop: 'isdeleted',             label: 'Deleted / Tombstoned Objects' },
         ];
         const presentProps = propChecks.filter(c => hasNodeProp(c.prop));
         if (presentProps.length) {
@@ -1828,6 +1872,8 @@
                 ${n.isAdmin ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-yellow-900/60 text-yellow-300 border border-yellow-700">HIGH VALUE</span>' : ''}
                 ${n.canDCSync ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-red-900/60 text-red-300 border border-red-700">DCSYNC</span>' : ''}
                 ${ownedNodes.has(nodeId) ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-green-900/60 text-green-300 border border-green-700">☠ OWNED</span>' : ''}
+                ${n.props?.isaclprotected ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-blue-900/60 text-blue-300 border border-blue-700" title="DACL is protected from inheritance">ACL PROTECTED</span>' : ''}
+                ${n.props?.isdeleted ? '<span class="px-2 py-0.5 rounded text-xs font-semibold bg-gray-700/80 text-gray-400 border border-gray-600" title="Tombstoned / deleted object">DELETED</span>' : ''}
             </div>
         </div>`;
 
