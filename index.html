@@ -45,7 +45,8 @@
 
             <button onclick="clearGraph()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Clear</button>
             <button onclick="exportPNG()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export PNG</button>
-            <button onclick="exportCSV()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export CSV</button>
+            <button onclick="exportCSV()"  class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export CSV</button>
+            <button onclick="exportHTML()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export HTML</button>
         </div>
 
         <div class="flex items-center gap-2">
@@ -89,6 +90,8 @@
         <span class="text-red-300">Critical ACLs: <span id="statAcls" class="font-bold">0</span></span>
         <span class="text-purple-400">Unconstrained Deleg: <span id="statUnconstrained" class="font-bold">0</span></span>
         <span class="text-orange-300">Cert Templates: <span id="statCerts" class="font-bold">0</span></span>
+        <span class="text-cyan-400">Relay Targets: <span id="statRelayTargets" class="font-bold">0</span></span>
+        <span class="text-cyan-300">WebClient: <span id="statWebClient" class="font-bold">0</span></span>
         <span class="text-pink-400">Paths to DA: <span id="statPaths" class="font-bold">-</span></span>
         <button onclick="findAllPaths(); switchTab('paths')" class="ml-auto text-xs text-gray-400 hover:text-white underline">Enumerate all paths</button>
     </div>
@@ -284,7 +287,9 @@
         // Misc CE edges
         SyncedToEntraUser:40, HostsCAService:60,
         // Targeted Kerberoasting
-        SPNTarget:55
+        SPNTarget:55,
+        // NTLM Relay
+        NTLMRelay:85
     };
 
     const HIGH_RISK_ACLS = new Set([
@@ -295,7 +300,8 @@
         'WriteSPN','AddMembers','ReadGMSAPassword','AddAllowedToAct',
         'ADCSESC1','ADCSESC3','ADCSESC4','ADCSESC6','ADCSESC8',
         'AZGlobalAdmin','AZPrivilegedRoleAdmin','AZResetPassword',
-        'AZAddSecret','AZGetSecrets','AZGetKeys','WriteGPLink','CoerceToTGT','SyncLAPSPassword'
+        'AZAddSecret','AZGetSecrets','AZGetKeys','WriteGPLink','CoerceToTGT','SyncLAPSPassword',
+        'NTLMRelay'
     ]);
 
     const EDGE_DESCRIPTIONS = {
@@ -367,6 +373,7 @@
         SyncedToEntraUser: 'On-premises AD account synced to Entra ID (Azure AD).',
         HostsCAService: 'Computer hosts the Active Directory Certificate Services CA role.',
         SPNTarget: 'This service account has an SPN targeting this computer — Kerberoastable against this specific service.',
+        NTLMRelay: 'NTLM credential relayed to this host — SMB signing not required, allowing an attacker to authenticate as the coerced machine account and execute commands or write ACLs.',
     };
 
     const EDGE_MITRE = {
@@ -414,6 +421,7 @@
         AZVMAdminLogin:     'T1078.004 – Valid Accounts: Cloud Accounts',
         AZGetSecrets:       'T1552.001 – Unsecured Credentials',
         SPNTarget:          'T1558.003 – Steal or Forge Kerberos Tickets: Kerberoasting',
+        NTLMRelay:          'T1557.001 – Adversary-in-the-Middle: LLMNR/NBT-NS Poisoning and SMB Relay',
     };
 
     const EXEC_EDGES = new Set([
@@ -443,6 +451,13 @@
         if (p.isdeleted)                             { score -= 50; flags.push('Deleted'); }
         if (node.isAdmin)                            { score += 50; }
         if (node.canDCSync)                          { score += 95; }
+
+        // Computer-specific: NTLM relay surface
+        if (node.type === 'Computer') {
+            if (p.signing === false || p.signingrequired === false) { score += 30; flags.push('SMB Relay Target'); }
+            if (p.smb1enabled === true)  { score += 20; flags.push('SMBv1 Enabled'); }
+            if (p.webclient  === true)   { score += 25; flags.push('WebClient Running'); }
+        }
 
         return { score: Math.max(0, Math.min(100, score)), flags };
     }
@@ -588,6 +603,31 @@
             parseArr(item.AllowedToEnroll,  'Enroll',            true);
             parseArr(item.SQLAdmins,        'SQLAdmin',          true);
             parseArr(item.ChildObjects,     'Contains',          false);
+
+            // ── AzureHound-specific relationship arrays ──────────────
+            // These keys are only present in AzureHound output; absent keys are silently ignored.
+            parseArr(item.Owners,              'AZOwns',                true);
+            parseArr(item.Contributors,        'AZContributor',         true);
+            parseArr(item.UserAccessAdmins,    'AZUserAccessAdmin',     true);
+            parseArr(item.AddMembers,          'AZAddMembers',          true);
+            parseArr(item.AddOwners,           'AZAddOwner',            true);
+            parseArr(item.GlobalAdmins,        'AZGlobalAdmin',         true);
+            parseArr(item.PrivilegedRoleAdmins,'AZPrivilegedRoleAdmin', true);
+            parseArr(item.ResetPasswords,      'AZResetPassword',       true);
+            parseArr(item.AddSecrets,          'AZAddSecret',           true);
+            parseArr(item.GetSecretUsers,      'AZGetSecrets',          true);
+            parseArr(item.GetKeyUsers,         'AZGetKeys',             true);
+            parseArr(item.GetCertificateUsers, 'AZGetCertificates',     true);
+            parseArr(item.VMAdmins,            'AZVMAdminLogin',        true);
+            parseArr(item.RunCommandAdmins,    'AZExecuteCommand',      true);
+            parseArr(item.GrantAppRoles,       'AZGrantAppRoles',       true);
+            parseArr(item.AppRoleAssignments,  'AZGrantAppRoles',       false);
+            parseArr(item.InboundTransitiveRoles, 'AZHasRole',          false);
+            // AZTenant is the Azure root — treat as high value (DA equivalent)
+            if (detectedType === 'AZTenant') {
+                adNodes[name].isAdmin       = true;
+                adNodes[name].props.highvalue = true;
+            }
 
             // GPOChanges: GPO-applied rights present on OU/Domain nodes
             if (item.GPOChanges) {
@@ -920,12 +960,18 @@
         document.getElementById('statDcsync').textContent  = dcsync;
         document.getElementById('statAcls').textContent    = crits;
         document.getElementById('statPaths').textContent   = '?';
-        const uncon = vals.filter(n => n.props?.unconstraineddelegation).length;
-        const certs = vals.filter(n => n.type === 'CertTemplate').length;
+        const uncon        = vals.filter(n => n.props?.unconstraineddelegation).length;
+        const certs        = vals.filter(n => n.type === 'CertTemplate').length;
+        const relayTargets = vals.filter(n => n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false)).length;
+        const webClients   = vals.filter(n => n.type === 'Computer' && n.props?.webclient === true).length;
         const unconEl = document.getElementById('statUnconstrained');
         const certEl  = document.getElementById('statCerts');
         if (unconEl) unconEl.textContent = uncon;
         if (certEl)  certEl.textContent  = certs;
+        const relayEl  = document.getElementById('statRelayTargets');
+        const wcEl     = document.getElementById('statWebClient');
+        if (relayEl) relayEl.textContent = relayTargets;
+        if (wcEl)    wcEl.textContent    = webClients;
         document.getElementById('statsBar').classList.remove('hidden');
     }
 
@@ -1286,6 +1332,43 @@
                 if (hvNodes.has(e.to)) { connected.add(e.from); connected.add(e.to); }
             });
             filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'ntlm_relay') {
+            // Show relay target computers (SMB signing not required) and their outbound edges
+            const relayNodes = new Set(filteredNodeIds.filter(id => {
+                const n = adNodes[id];
+                return n?.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false);
+            }));
+            const connected = new Set([...relayNodes]);
+            filteredEdges.forEach(e => {
+                if (relayNodes.has(e.from) || relayNodes.has(e.to)) { connected.add(e.from); connected.add(e.to); }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'webclient') {
+            // Show WebClient hosts and their outbound edges (coerce candidates)
+            const wcNodes = new Set(filteredNodeIds.filter(id =>
+                adNodes[id]?.type === 'Computer' && adNodes[id]?.props?.webclient === true
+            ));
+            const connected = new Set([...wcNodes]);
+            filteredEdges.forEach(e => {
+                if (wcNodes.has(e.from) || wcNodes.has(e.to)) { connected.add(e.from); connected.add(e.to); }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'relay_chain') {
+            // Show full coerce→relay chains: webclient hosts + relay targets they connect to
+            const wcNodes = new Set(filteredNodeIds.filter(id =>
+                adNodes[id]?.type === 'Computer' && adNodes[id]?.props?.webclient === true
+            ));
+            const relayNodes = new Set(filteredNodeIds.filter(id => {
+                const n = adNodes[id];
+                return n?.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false);
+            }));
+            const connected = new Set([...wcNodes, ...relayNodes]);
+            filteredEdges.forEach(e => {
+                if (wcNodes.has(e.from) || relayNodes.has(e.from) || relayNodes.has(e.to)) {
+                    connected.add(e.from); connected.add(e.to);
+                }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
         }
 
         const nodeSet = new Set(filteredNodeIds);
@@ -1365,6 +1448,37 @@
         hv.textContent = 'High Value Targets + Paths';
         special.appendChild(hv);
         select.appendChild(special);
+
+        // NTLM Relay analysis
+        const relayTargetCount = Object.values(adNodes).filter(n =>
+            n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false)
+        ).length;
+        const webClientCount = Object.values(adNodes).filter(n =>
+            n.type === 'Computer' && n.props?.webclient === true
+        ).length;
+        if (relayTargetCount > 0 || webClientCount > 0) {
+            const relayGrp = document.createElement('optgroup');
+            relayGrp.label = 'NTLM Relay';
+            if (relayTargetCount > 0) {
+                const o1 = document.createElement('option');
+                o1.value = 'ntlm_relay';
+                o1.textContent = `SMB Relay Targets (${relayTargetCount})`;
+                relayGrp.appendChild(o1);
+            }
+            if (webClientCount > 0) {
+                const o2 = document.createElement('option');
+                o2.value = 'webclient';
+                o2.textContent = `WebClient Hosts (${webClientCount})`;
+                relayGrp.appendChild(o2);
+            }
+            if (relayTargetCount > 0 && webClientCount > 0) {
+                const o3 = document.createElement('option');
+                o3.value = 'relay_chain';
+                o3.textContent = 'Coerce → Relay Chains';
+                relayGrp.appendChild(o3);
+            }
+            select.appendChild(relayGrp);
+        }
 
         // Edge categories
         const cats = {
@@ -1939,7 +2053,26 @@
             const sqlAdmins = adEdges.filter(e => e.to === nodeId && e.label === 'SQLAdmin').length;
             const sessions  = adEdges.filter(e => e.from === nodeId && e.label === 'HasSession').length;
             const ctok = nodeToken(nodeId);
-            html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold">Local Admins</div>`;
+            // SMB Relay surface
+            const smbSigning    = n.props?.signing;
+            const smbSigningReq = n.props?.signingrequired;
+            const webClient     = n.props?.webclient;
+            const smb1          = n.props?.smb1enabled;
+            const isRelayTarget = smbSigning === false || smbSigningReq === false;
+            const relayBadge    = isRelayTarget
+                ? `<span class="px-1.5 py-0.5 bg-red-900/60 text-red-300 border border-red-700/50 rounded text-xs ml-1">RELAY TARGET</span>`
+                : '';
+            const wcBadge = webClient === true
+                ? `<span class="px-1.5 py-0.5 bg-cyan-900/60 text-cyan-300 border border-cyan-700/50 rounded text-xs ml-1">WEBCLIENT</span>`
+                : '';
+            if (isRelayTarget || webClient === true || smbSigning != null || smbSigningReq != null || smb1 != null) {
+                html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold border-t border-gray-700/40">NTLM Relay Surface${relayBadge}${wcBadge}</div>`;
+                if (smbSigning    != null) html += renderOverviewRow('SMB Signing',          smbSigning    ? 'Enabled' : '<span class="text-red-400 font-bold">Disabled</span>', null);
+                if (smbSigningReq != null) html += renderOverviewRow('SMB Signing Required', smbSigningReq ? 'Yes'     : '<span class="text-red-400 font-bold">No — Relay Target</span>', null);
+                if (smb1          != null) html += renderOverviewRow('SMBv1 Enabled',        smb1          ? '<span class="text-red-400 font-bold">Yes</span>' : 'No', null);
+                if (webClient     != null) html += renderOverviewRow('WebClient Running',    webClient     ? '<span class="text-cyan-400 font-bold">Yes — HTTP Coerce</span>' : 'No', null);
+            }
+            html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold border-t border-gray-700/40">Local Admins</div>`;
             html += renderOverviewRow('Explicit Admins',   explicit,  `quickAdminsOn('${ctok}')`);
             html += renderOverviewRow('Unrolled Admins',   unrolled,  `quickAdminsOn('${ctok}')`);
             html += renderOverviewRow('Foreign Admins',    foreignAdmins, null);
@@ -1981,6 +2114,37 @@
             html += `<div class="bg-gray-900/30 px-2 py-1 text-xs text-gray-500 font-semibold border-t border-gray-700/40">Affecting GPOs</div>`;
             html += renderOverviewRow('GPOs Directly Affecting This OU',   gpoDirect,      null);
             html += renderOverviewRow('GPOs Affecting This OU',            gpoTotal,       null);
+
+        } else if (n.type.startsWith('AZ')) {
+            const p = n.props || {};
+            // Azure identity fields
+            if (p.tenantid)    html += renderOverviewRow('Tenant ID',    p.tenantid,    null);
+            if (p.appid)       html += renderOverviewRow('App ID',       p.appid,       null);
+            if (p.objectid || p._oid) html += renderOverviewRow('Object ID', p.objectid || p._oid, null);
+            if (p.serviceprincipaltype) html += renderOverviewRow('SP Type', p.serviceprincipaltype, null);
+            if (p.usertype)    html += renderOverviewRow('User Type',    p.usertype,    null);
+
+            // Inbound role grants to this object
+            const rolesHeld   = adEdges.filter(e => e.from === nodeId && ['AZGlobalAdmin','AZPrivilegedRoleAdmin','AZHasRole','AZUserAccessAdmin'].includes(e.label));
+            const rolesGranted= adEdges.filter(e => e.to   === nodeId && ['AZGlobalAdmin','AZPrivilegedRoleAdmin','AZHasRole','AZUserAccessAdmin'].includes(e.label));
+            if (rolesHeld.length)    html += renderOverviewRow('Roles Held',         rolesHeld.length,    null);
+            if (rolesGranted.length) html += renderOverviewRow('Roles Granted To This Object', rolesGranted.length, null);
+
+            // High-risk inbound permissions
+            const inAddSecret = adEdges.filter(e => e.to === nodeId && e.label === 'AZAddSecret').length;
+            const inExecCmd   = adEdges.filter(e => e.to === nodeId && e.label === 'AZExecuteCommand').length;
+            const inResetPwd  = adEdges.filter(e => e.to === nodeId && e.label === 'AZResetPassword').length;
+            const inOwns      = adEdges.filter(e => e.to === nodeId && e.label === 'AZOwns').length;
+            if (inAddSecret) html += renderOverviewRow('Principals with AZAddSecret',    inAddSecret, null);
+            if (inExecCmd)   html += renderOverviewRow('Principals with Execute Command', inExecCmd,   null);
+            if (inResetPwd)  html += renderOverviewRow('Principals with Password Reset',  inResetPwd,  null);
+            if (inOwns)      html += renderOverviewRow('Owners of this Object',           inOwns,      null);
+
+            // Outbound permissions this object holds
+            const outHighRisk = adEdges.filter(e => e.from === nodeId && HIGH_RISK_ACLS.has(e.label));
+            html += renderOverviewRow('Outbound High-Risk Permissions', outHighRisk.length, null);
+            const hvts = getReachableHVTs(nodeId);
+            html += renderOverviewRow('Reachable High Value Targets', hvts, null);
 
         } else {
             const hvts = getReachableHVTs(nodeId);
@@ -2494,6 +2658,123 @@
                     foundPaths.push({ from: f.template, path: { nodes: [f.template], edges: [] }, hops: 0, queryLabel: f.esc + ': ' + f.detail.slice(0, 60) });
                 }
             });
+
+        } else if (qtype === 'azure_ga') {
+            // Azure Global Admin paths: who holds AZGlobalAdmin/AZPrivilegedRoleAdmin
+            const azHighValue = new Set(
+                adEdges.filter(e => ['AZGlobalAdmin','AZPrivilegedRoleAdmin'].includes(e.label)).map(e => e.from)
+            );
+            // Surface GA holders directly
+            azHighValue.forEach(id => {
+                const label = adEdges.find(e => e.from === id && e.label === 'AZGlobalAdmin') ? 'Azure Global Admin' : 'Azure Priv Role Admin';
+                foundPaths.push({ from: id, path: { nodes: [id], edges: [] }, hops: 0, queryLabel: label });
+            });
+            // Find on-prem paths that reach an AZ GA holder (hybrid attack surface)
+            if (azHighValue.size > 0) {
+                const onPrem = Object.keys(adNodes).filter(id =>
+                    !adNodes[id].type.startsWith('AZ') && !azHighValue.has(id)
+                );
+                onPrem.forEach(id => {
+                    const r = bfsPath(id, azHighValue);
+                    if (r && r.nodes.length > 1)
+                        foundPaths.push({ from: id, path: r, hops: r.nodes.length - 1, queryLabel: 'On-Prem → Azure GA' });
+                });
+            }
+            if (!foundPaths.length) {
+                document.getElementById('statusMessage').textContent = 'No Azure Global Admin edges found — load AzureHound data.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+
+        } else if (qtype === 'ntlm_relay') {
+            // SMB relay targets: computers with signing not required → BFS to DA
+            const relayTargets = Object.keys(adNodes).filter(id => {
+                const n = adNodes[id];
+                return n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false);
+            });
+            if (!relayTargets.length) {
+                document.getElementById('statusMessage').textContent = 'No SMB relay targets found — signing/signingrequired props not present in this collection.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+            relayTargets.forEach(id => {
+                const r = bfsPath(id, daSet);
+                if (r) {
+                    foundPaths.push({ from: id, path: r, hops: r.nodes.length - 1, queryLabel: 'Relay Target → DA' });
+                } else {
+                    // No DA path but still surface it as a finding
+                    foundPaths.push({ from: id, path: { nodes: [id], edges: [] }, hops: 0, queryLabel: 'Relay Target (no DA path)' });
+                }
+            });
+
+        } else if (qtype === 'webclient') {
+            // WebClient hosts: computers with webclient=true → show outbound paths
+            const wcHosts = Object.keys(adNodes).filter(id =>
+                adNodes[id].type === 'Computer' && adNodes[id].props?.webclient === true
+            );
+            if (!wcHosts.length) {
+                document.getElementById('statusMessage').textContent = 'No WebClient hosts found — webclient prop not present in this collection.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+            wcHosts.forEach(id => {
+                const r = bfsPath(id, daSet);
+                if (r) {
+                    foundPaths.push({ from: id, path: r, hops: r.nodes.length - 1, queryLabel: 'WebClient Host → DA' });
+                } else {
+                    foundPaths.push({ from: id, path: { nodes: [id], edges: [] }, hops: 0, queryLabel: 'WebClient Host (no DA path)' });
+                }
+            });
+
+        } else if (qtype === 'relay_chain') {
+            // Full coerce→relay chain:
+            // 1. WebClient host can be coerced (printer bug / PetitPotam / DFSCoerce)
+            // 2. Its machine account credential is relayed to a signing-disabled target
+            // 3. If the wc host has AdminTo on the relay target → immediate RCE
+            // 4. Also check relay target → BFS to DA
+            const relayTargetSet = new Set(Object.keys(adNodes).filter(id => {
+                const n = adNodes[id];
+                return n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false);
+            }));
+            const wcHosts = Object.keys(adNodes).filter(id =>
+                adNodes[id].type === 'Computer' && adNodes[id].props?.webclient === true
+            );
+            if (!relayTargetSet.size && !wcHosts.length) {
+                document.getElementById('statusMessage').textContent = 'No relay chain data — signing/webclient props not present in this collection.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+            // Chain: wc → [NTLMRelay] → relay_target → ... → DA
+            wcHosts.forEach(wcId => {
+                // Direct: wc machine account has AdminTo a relay target
+                adEdges.filter(e => e.from === wcId && e.label === 'AdminTo' && relayTargetSet.has(e.to)).forEach(e => {
+                    const r = bfsPath(e.to, daSet);
+                    const chainNodes = r ? [wcId, ...r.nodes] : [wcId, e.to];
+                    const chainEdges = r ? ['NTLMRelay', ...r.edges] : ['NTLMRelay'];
+                    foundPaths.push({
+                        from: wcId,
+                        path: { nodes: chainNodes, edges: chainEdges },
+                        hops: chainNodes.length - 1,
+                        queryLabel: 'Coerce → Relay → RCE'
+                    });
+                });
+                // Indirect: relay to any target, then BFS
+                relayTargetSet.forEach(rtId => {
+                    if (rtId === wcId) return;
+                    const r = bfsPath(rtId, daSet);
+                    if (r && r.nodes.length > 1) {
+                        foundPaths.push({
+                            from: wcId,
+                            path: { nodes: [wcId, ...r.nodes], edges: ['NTLMRelay', ...r.edges] },
+                            hops: r.nodes.length,
+                            queryLabel: 'Coerce → Relay → DA'
+                        });
+                    }
+                });
+            });
+            // Deduplicate by serialised path
+            const seen = new Set();
+            foundPaths = foundPaths.filter(p => {
+                const key = p.path.nodes.join('|');
+                if (seen.has(key)) return false;
+                seen.add(key); return true;
+            });
         }
 
         foundPaths.sort((a, b) => a.hops - b.hops);
@@ -2525,6 +2806,10 @@
             <button onclick="runQuery('writable')"       class="px-2 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 hover:bg-purple-800/60 transition">Writable ACLs</button>
             <button onclick="runQuery('forest')"         class="px-2 py-0.5 rounded text-xs bg-teal-900/50 text-teal-300 border border-teal-700/50 hover:bg-teal-800/60 transition">Forest Trusts</button>
             <button onclick="runQuery('adcs')"           class="px-2 py-0.5 rounded text-xs bg-orange-900/50 text-orange-300 border border-orange-700/50 hover:bg-orange-800/60 transition">ADCS ESC</button>
+            <button onclick="runQuery('azure_ga')"      class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">Azure GA</button>
+            <button onclick="runQuery('ntlm_relay')"     class="px-2 py-0.5 rounded text-xs bg-cyan-900/50 text-cyan-300 border border-cyan-700/50 hover:bg-cyan-800/60 transition">Relay Targets</button>
+            <button onclick="runQuery('webclient')"      class="px-2 py-0.5 rounded text-xs bg-cyan-900/40 text-cyan-300 border border-cyan-700/40 hover:bg-cyan-800/50 transition">WebClient</button>
+            <button onclick="runQuery('relay_chain')"    class="px-2 py-0.5 rounded text-xs bg-cyan-900/60 text-cyan-200 border border-cyan-600/60 hover:bg-cyan-800/70 transition font-semibold">⚡ Relay Chain</button>
             <button onclick="findPathsFromOwned()" id="btnFindOwned"
                 class="px-2 py-0.5 rounded text-xs bg-green-900/50 text-green-300 border border-green-700/50 hover:bg-green-800/60 transition">☠ From Owned (0)</button>
         </div>
@@ -2715,6 +3000,52 @@
                 </div>`;
             });
             if (escFindings.length > 20) html += `<div class="text-gray-600 text-xs">...and ${escFindings.length - 20} more</div>`;
+            html += `</div>`;
+        }
+
+        // Azure / Entra ID section
+        const azVals       = vals.filter(n => n.type.startsWith('AZ'));
+        if (azVals.length) {
+            const azTypeCounts  = {};
+            azVals.forEach(n => { azTypeCounts[n.type] = (azTypeCounts[n.type] || 0) + 1; });
+            const azGAList   = adEdges.filter(e => e.label === 'AZGlobalAdmin');
+            const azPRAList  = adEdges.filter(e => e.label === 'AZPrivilegedRoleAdmin');
+            const azSecList  = adEdges.filter(e => ['AZAddSecret','AZGetSecrets'].includes(e.label));
+            const azExecList = adEdges.filter(e => e.label === 'AZExecuteCommand');
+            const azRstList  = adEdges.filter(e => e.label === 'AZResetPassword');
+
+            html += `<div class="mb-4">
+                <div class="font-semibold text-xs mb-1.5 text-blue-400 uppercase tracking-wide">Azure / Entra ID (${azVals.length} objects)</div>
+                <div class="flex flex-wrap gap-1 mb-2">
+                    ${Object.entries(azTypeCounts).map(([t,c]) =>
+                        `<span class="px-1.5 py-0.5 rounded text-xs" style="background:#1d4ed822;color:#60a5fa;border:1px solid #1d4ed844">${esc(t)}: ${c}</span>`
+                    ).join('')}
+                </div>`;
+            const azRow = (edge, color) =>
+                `<div class="text-xs py-0.5 px-1 text-gray-300">${esc(edge.from.split('@')[0])} <span style="color:${color}">${esc(edge.label)}</span> &#8594; ${esc(edge.to.split('@')[0])}</div>`;
+            if (azGAList.length) {
+                html += `<div class="text-xs font-semibold text-red-400 mb-0.5 mt-1">Global Administrators (${azGAList.length})</div>`;
+                azGAList.slice(0,8).forEach(e => { html += azRow(e,'#f87171'); });
+            }
+            if (azPRAList.length) {
+                html += `<div class="text-xs font-semibold text-orange-400 mb-0.5 mt-1">Privileged Role Admins (${azPRAList.length})</div>`;
+                azPRAList.slice(0,5).forEach(e => { html += azRow(e,'#fb923c'); });
+            }
+            if (azSecList.length) {
+                html += `<div class="text-xs font-semibold text-yellow-400 mb-0.5 mt-1">App Secret / Get Secrets (${azSecList.length})</div>`;
+                azSecList.slice(0,5).forEach(e => { html += azRow(e,'#fbbf24'); });
+            }
+            if (azExecList.length) {
+                html += `<div class="text-xs font-semibold text-orange-400 mb-0.5 mt-1">VM Execute Command (${azExecList.length})</div>`;
+                azExecList.slice(0,5).forEach(e => { html += azRow(e,'#fb923c'); });
+            }
+            if (azRstList.length) {
+                html += `<div class="text-xs font-semibold text-yellow-400 mb-0.5 mt-1">Password Resets (${azRstList.length})</div>`;
+                azRstList.slice(0,5).forEach(e => { html += azRow(e,'#fbbf24'); });
+            }
+            if (!azGAList.length && !azPRAList.length && !azSecList.length && !azExecList.length && !azRstList.length) {
+                html += `<div class="text-gray-500 text-xs">Azure objects present but no high-risk edges detected.</div>`;
+            }
             html += `</div>`;
         }
 
@@ -2984,6 +3315,237 @@
         const a    = document.createElement('a');
         a.href     = url;
         a.download = 'zhound-findings.csv';
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+
+    function exportHTML() {
+        if (!Object.keys(adNodes).length) { alert('No data loaded'); return; }
+
+        const vals    = Object.values(adNodes);
+        const dateStr = new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' });
+        const domains = [...new Set(vals.map(n => n.props?.domain).filter(Boolean))].join(', ') || 'Unknown';
+
+        // ── Data gathering ────────────────────────────────────────
+        const kerberoastable = vals.filter(n => n.props?.hasspn        && n.props?.enabled !== false && n.type === 'User');
+        const asrep          = vals.filter(n => n.props?.dontreqpreauth && n.props?.enabled !== false);
+        const unconstrained  = vals.filter(n => n.props?.unconstraineddelegation);
+        const dcsyncNodes    = vals.filter(n => n.canDCSync);
+        const sidHistory     = vals.filter(n => n.props?.sidhistory?.length > 0);
+        const critAcls       = adEdges.filter(e => ['GenericAll','WriteDacl','WriteOwner'].includes(e.label));
+        const lapsReaders    = adEdges.filter(e => e.label === 'ReadLAPSPassword');
+        const gmsaReaders    = adEdges.filter(e => e.label === 'ReadGMSAPassword');
+        const rbcdEdges      = adEdges.filter(e => ['AllowedToAct','AddAllowedToAct','WriteAccountRestrictions'].includes(e.label) && adNodes[e.to]?.type === 'Computer');
+        const relayTargets   = vals.filter(n => n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false));
+        const webClients     = vals.filter(n => n.type === 'Computer' && n.props?.webclient === true);
+        const escFindings    = detectADCS();
+        const azNodes        = vals.filter(n => n.type.startsWith('AZ'));
+        const azGAEdges      = adEdges.filter(e => e.label === 'AZGlobalAdmin');
+        const azPRAEdges     = adEdges.filter(e => e.label === 'AZPrivilegedRoleAdmin');
+        const azSecretEdges  = adEdges.filter(e => ['AZAddSecret','AZGetSecrets'].includes(e.label));
+        const azExecEdges    = adEdges.filter(e => e.label === 'AZExecuteCommand');
+        const azResetEdges   = adEdges.filter(e => e.label === 'AZResetPassword');
+        const highRiskNodes  = vals.map(n => ({ n, r: calcNodeRisk(n) })).filter(({ r }) => r.score >= 40).sort((a,b) => b.r.score - a.r.score).slice(0, 60);
+        const typeCounts     = {};
+        vals.forEach(n => { typeCounts[n.type] = (typeCounts[n.type] || 0) + 1; });
+
+        // ── Helpers ───────────────────────────────────────────────
+        const H  = str => String(str || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+        const sh = name => H(String(name || '').split('@')[0].split('\\').pop());
+        const bdg = (txt, cls) => `<span class="badge badge-${cls}">${H(txt)}</span>`;
+        const rBdg = score => score >= 70 ? bdg('Critical','critical') : score >= 40 ? bdg('High','high') : score >= 20 ? bdg('Medium','medium') : bdg('Low','low');
+
+        const tbl = (headers, rows, emptyMsg) => {
+            if (!rows.length) return `<p class="empty">${emptyMsg || 'None found.'}</p>`;
+            return `<table><thead><tr>${headers.map(h => `<th>${H(h)}</th>`).join('')}</tr></thead>
+                <tbody>${rows.slice(0,200).map(r => `<tr>${r.map(c => `<td>${c}</td>`).join('')}</tr>`).join('')}</tbody>
+            </table>${rows.length > 200 ? `<p class="empty">…and ${rows.length-200} more rows not shown.</p>` : ''}`;
+        };
+        const sec  = (title, body) => `<div class="section"><h2>${H(title)}</h2>${body}</div>`;
+        const sub  = (title, body) => `<h3>${H(title)}</h3>${body}`;
+
+        // ── CSS ───────────────────────────────────────────────────
+        const css = `
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;font-size:13px;color:#1a1a2e;background:#fff;padding:32px;max-width:1100px;margin:0 auto}
+h1{font-size:22px;font-weight:800;color:#1e3a5f;margin-bottom:4px}
+.subtitle{color:#6b7280;font-size:12px;margin-bottom:24px}
+h2{font-size:12px;font-weight:700;color:#1e3a5f;margin:28px 0 10px;padding-bottom:6px;border-bottom:2px solid #e2e8f0;text-transform:uppercase;letter-spacing:.07em}
+h3{font-size:12px;font-weight:600;color:#374151;margin:14px 0 6px}
+table{width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px}
+th{background:#f8fafc;color:#374151;text-align:left;padding:7px 10px;border:1px solid #e2e8f0;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;white-space:nowrap}
+td{padding:5px 10px;border:1px solid #e2e8f0;vertical-align:top;word-break:break-word}
+tr:nth-child(even) td{background:#fafafa}
+.badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:11px;font-weight:600;white-space:nowrap}
+.badge-critical{background:#fee2e2;color:#991b1b}
+.badge-high{background:#fef3c7;color:#92400e}
+.badge-medium{background:#fef9c3;color:#854d0e}
+.badge-low{background:#dcfce7;color:#166534}
+.badge-info{background:#dbeafe;color:#1e40af}
+.badge-azure{background:#dbeafe;color:#1d4ed8}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(145px,1fr));gap:12px;margin-bottom:20px}
+.card{border:1px solid #e2e8f0;border-radius:8px;padding:14px 10px;text-align:center;background:#fafafa}
+.card .num{font-size:28px;font-weight:800;line-height:1;margin-bottom:4px}
+.card .lbl{font-size:10px;color:#6b7280;text-transform:uppercase;letter-spacing:.05em}
+.c-crit .num{color:#dc2626}.c-high .num{color:#d97706}.c-med .num{color:#ca8a04}
+.c-info .num{color:#2563eb}.c-az .num{color:#1d4ed8}.c-ok .num{color:#16a34a}
+.section{margin-bottom:28px}
+.empty{color:#9ca3af;font-style:italic;font-size:12px;padding:6px 0}
+.chain{font-family:monospace;font-size:11px;color:#374151}
+.cedge{color:#dc2626;font-weight:700}
+footer{margin-top:40px;padding-top:14px;border-top:1px solid #e2e8f0;font-size:11px;color:#9ca3af;text-align:center}
+@media print{body{padding:14px;font-size:11px}}`.trim();
+
+        // ── Executive summary cards ───────────────────────────────
+        const cards = [
+            { num: Object.keys(adNodes).length, lbl:'Total Objects',       cls:'c-info' },
+            { num: adEdges.length,               lbl:'Total Edges',         cls:'c-info' },
+            { num: dcsyncNodes.length,           lbl:'DCSync Risk',         cls: dcsyncNodes.length    ? 'c-crit' : 'c-ok' },
+            { num: critAcls.length,              lbl:'Critical ACLs',       cls: critAcls.length       ? 'c-crit' : 'c-ok' },
+            { num: kerberoastable.length,        lbl:'Kerberoastable',      cls: kerberoastable.length ? 'c-high' : 'c-ok' },
+            { num: asrep.length,                 lbl:'AS-REP Roastable',    cls: asrep.length          ? 'c-high' : 'c-ok' },
+            { num: unconstrained.length,         lbl:'Unconstrained Deleg', cls: unconstrained.length  ? 'c-high' : 'c-ok' },
+            { num: escFindings.length,           lbl:'ADCS ESC',            cls: escFindings.length    ? 'c-crit' : 'c-ok' },
+            { num: relayTargets.length,          lbl:'Relay Targets',       cls: relayTargets.length   ? 'c-med'  : 'c-ok' },
+            { num: webClients.length,            lbl:'WebClient Hosts',     cls: webClients.length     ? 'c-med'  : 'c-ok' },
+        ];
+        if (azNodes.length) cards.push({ num: azGAEdges.length, lbl:'Azure Global Admins', cls: azGAEdges.length ? 'c-az' : 'c-ok' });
+
+        const summaryHtml =
+            `<div class="grid">${cards.map(c => `<div class="card ${c.cls}"><div class="num">${c.num}</div><div class="lbl">${H(c.lbl)}</div></div>`).join('')}</div>` +
+            sub('Object Inventory', tbl(['Object Type','Count'],
+                ['User','Computer','Group','Domain','GPO','OU','CertTemplate','Container']
+                    .filter(t => typeCounts[t]).map(t => [H(t), typeCounts[t]])
+                    .concat(Object.keys(typeCounts).filter(t => t.startsWith('AZ')).map(t => [H(t), typeCounts[t]]))
+            ));
+
+        // ── Section builders ──────────────────────────────────────
+        const critHtml = sec('Critical Findings',
+            sub(`DCSync Principals (${dcsyncNodes.length})`,
+                tbl(['Name','Type','Domain','Risk'],
+                    dcsyncNodes.map(n => { const {score}=calcNodeRisk(n); return [sh(n.name), H(n.type), H(n.props?.domain||'—'), rBdg(score)]; }),
+                    'No DCSync principals found.')) +
+            sub(`Critical ACLs — GenericAll / WriteDacl / WriteOwner (${critAcls.length})`,
+                tbl(['Principal','Right','Target','MITRE'],
+                    critAcls.map(e => [sh(e.from), bdg(e.label,'critical'), sh(e.to), H(EDGE_MITRE[e.label]||'—')]),
+                    'None found.'))
+        );
+
+        const credHtml = sec('Credential Theft',
+            sub(`Kerberoastable (${kerberoastable.length})`,
+                tbl(['Account','Domain','Pwd Never Expires','AdminCount'],
+                    kerberoastable.map(n => [sh(n.name), H(n.props?.domain||'—'), n.props?.pwdneverexpires ? bdg('Yes','critical') : 'No', n.props?.admincount ? bdg('Yes','high') : 'No']),
+                    'None found.')) +
+            sub(`AS-REP Roastable (${asrep.length})`,
+                tbl(['Account','Type','Domain'],
+                    asrep.map(n => [sh(n.name), H(n.type), H(n.props?.domain||'—')]),
+                    'None found.')) +
+            sub(`LAPS Readers (${lapsReaders.length})`,
+                tbl(['Principal','Computer'],
+                    lapsReaders.map(e => [sh(e.from), sh(e.to)]),
+                    'None found or LAPS not collected.')) +
+            sub(`GMSA Readers (${gmsaReaders.length})`,
+                tbl(['Principal','GMSA Account'],
+                    gmsaReaders.map(e => [sh(e.from), sh(e.to)]),
+                    'None found.')) +
+            sub(`SID History Present (${sidHistory.length})`,
+                tbl(['Name','Type','Entries'],
+                    sidHistory.map(n => [sh(n.name), H(n.type), n.props?.sidhistory?.length||'?']),
+                    'None found.'))
+        );
+
+        const delegHtml = sec('Delegation & RBCD',
+            sub(`Unconstrained Delegation (${unconstrained.length})`,
+                tbl(['Name','Type','OS','Domain'],
+                    unconstrained.map(n => [sh(n.name), H(n.type), H(n.props?.operatingsystem||'—'), H(n.props?.domain||'—')]),
+                    'None found.')) +
+            sub(`Resource-Based Constrained Delegation (${rbcdEdges.length})`,
+                tbl(['Principal','Right','Target Computer'],
+                    rbcdEdges.map(e => [sh(e.from), bdg(e.label,'high'), sh(e.to)]),
+                    'None found.'))
+        );
+
+        const adcsHtml = sec(`ADCS Vulnerabilities (${escFindings.length})`,
+            tbl(['ESC','Template','Detail'],
+                escFindings.map(f => [bdg(f.esc,'critical'), H(f.template), H(f.detail)]),
+                'None detected or ADCS data not collected.')
+        );
+
+        const relayHtml = sec('NTLM Relay',
+            sub(`SMB Relay Targets — Signing Not Required (${relayTargets.length})`,
+                tbl(['Computer','SMB Signing','Signing Required','OS','Domain'],
+                    relayTargets.map(n => [
+                        sh(n.name),
+                        n.props?.signing === false         ? bdg('Disabled','critical') : H(String(n.props?.signing  ??'—')),
+                        n.props?.signingrequired === false  ? bdg('No','critical')       : H(String(n.props?.signingrequired??'—')),
+                        H(n.props?.operatingsystem||'—'), H(n.props?.domain||'—')
+                    ]),
+                    'None found — signing props not in collection.')) +
+            sub(`WebClient Hosts — HTTP Coerce Candidates (${webClients.length})`,
+                tbl(['Computer','OS','Domain'],
+                    webClients.map(n => [sh(n.name), H(n.props?.operatingsystem||'—'), H(n.props?.domain||'—')]),
+                    'None found — webclient prop not in collection.'))
+        );
+
+        let azureHtml = '';
+        if (azNodes.length) {
+            azureHtml = sec(`Azure / Entra ID (${azNodes.length} objects)`,
+                sub('Azure Object Inventory',
+                    tbl(['Type','Count'], Object.keys(typeCounts).filter(t => t.startsWith('AZ')).map(t => [H(t), typeCounts[t]]))) +
+                sub(`Global Administrators (${azGAEdges.length})`,
+                    tbl(['Principal','Grants Admin To'], azGAEdges.map(e => [sh(e.from), sh(e.to)]), 'No AZGlobalAdmin edges found.')) +
+                sub(`Privileged Role Admins (${azPRAEdges.length})`,
+                    tbl(['Principal','Target'], azPRAEdges.map(e => [sh(e.from), sh(e.to)]), 'None found.')) +
+                sub(`App Secret / Get Secrets (${azSecretEdges.length})`,
+                    tbl(['Principal','Right','Target'], azSecretEdges.map(e => [sh(e.from), bdg(e.label,'azure'), sh(e.to)]), 'None found.')) +
+                sub(`VM Execute Command (${azExecEdges.length})`,
+                    tbl(['Principal','Target VM'], azExecEdges.map(e => [sh(e.from), sh(e.to)]), 'None found.')) +
+                sub(`Password Reset (${azResetEdges.length})`,
+                    tbl(['Principal','Target User'], azResetEdges.map(e => [sh(e.from), sh(e.to)]), 'None found.'))
+            );
+        }
+
+        const hrHtml = sec(`Top High-Risk Nodes (${highRiskNodes.length})`,
+            tbl(['Name','Type','Score','Level','Flags','Domain'],
+                highRiskNodes.map(({ n, r }) => [
+                    sh(n.name), H(n.type), r.score, rBdg(r.score),
+                    r.flags.map(f => bdg(f, r.score >= 70 ? 'critical' : 'high')).join(' ') || '—',
+                    H(n.props?.domain||'—')
+                ]),
+                'No high-risk nodes.')
+        );
+
+        const pathRows = foundPaths.slice(0,150).map(p => {
+            const nodes = p.path.nodes, edges = p.path.edges;
+            let chain = '';
+            nodes.forEach((n, idx) => {
+                chain += `<span>${sh(n)}</span>`;
+                if (edges[idx]) chain += ` <span class="cedge">—[${H(edges[idx])}]→</span> `;
+            });
+            const cls = p.hops <= 2 ? 'critical' : p.hops <= 4 ? 'high' : 'medium';
+            return [bdg(p.queryLabel || getRiskLabel(p.hops <= 2 ? 70 : p.hops <= 4 ? 40 : 20), cls), p.hops, `<div class="chain">${chain}</div>`];
+        });
+        const pathsHtml = sec(`Attack Paths${foundPaths.length ? ' (' + foundPaths.length + ' found)' : ' — Not enumerated'}`,
+            foundPaths.length
+                ? tbl(['Severity','Hops','Path'], pathRows)
+                : `<p class="empty">No paths enumerated — run a query in the app first (e.g. "All Paths").</p>`
+        );
+
+        // ── Assemble ──────────────────────────────────────────────
+        const body = `
+<h1>Z-Hound Security Assessment Report</h1>
+<p class="subtitle">Generated: ${H(dateStr)} &nbsp;&bull;&nbsp; Domain(s): ${H(domains)} &nbsp;&bull;&nbsp; ${Object.keys(adNodes).length} objects &nbsp;&bull;&nbsp; ${adEdges.length} edges</p>
+${sec('Executive Summary', summaryHtml)}
+${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${pathsHtml}
+<footer>Generated by Z-Hound &nbsp;&bull;&nbsp; ${H(dateStr)} &nbsp;&bull;&nbsp; All data processed locally in-browser — no data was transmitted externally.</footer>`;
+
+        const fullHtml = `<!DOCTYPE html>\n<html lang="en">\n<head>\n<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n<title>Z-Hound Report — ${H(dateStr)}</title>\n<style>${css}</style>\n</head>\n<body>${body}\n</body>\n</html>`;
+
+        const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8;' });
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href     = url;
+        a.download = `zhound-report-${new Date().toISOString().slice(0,10)}.html`;
         a.click();
         URL.revokeObjectURL(url);
     }
