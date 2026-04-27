@@ -1,0 +1,83 @@
+/* defender-module.css
+   M365 Defender ExposureGraphEdges module styles for Z-Hound Reforged
+   Follows Z-Hound's dark theme; no new color palettes introduced. */
+
+/* ── Toast notifications ─────────────────────────────────────────── */
+.def-toast {
+    padding: 8px 14px;
+    border-radius: 6px;
+    font-size: 12px;
+    font-weight: 500;
+    max-width: 360px;
+    pointer-events: none;
+    opacity: 1;
+    transition: opacity 0.45s ease;
+    box-shadow: 0 4px 14px rgba(0,0,0,0.5);
+    line-height: 1.45;
+    word-break: break-word;
+}
+.def-toast-success {
+    background: #064e3b;
+    color: #6ee7b7;
+    border: 1px solid #065f46;
+}
+.def-toast-error {
+    background: #7f1d1d;
+    color: #fca5a5;
+    border: 1px solid #991b1b;
+}
+.def-toast-info {
+    background: #1e3a5f;
+    color: #93c5fd;
+    border: 1px solid #1e40af;
+}
+.def-toast-out {
+    opacity: 0;
+}
+
+/* ── Drag-and-drop overlay ───────────────────────────────────────── */
+.def-drag-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(99, 102, 241, 0.12);
+    border: 2px dashed #6366f1;
+    border-radius: 4px;
+    display: none;               /* shown via JS */
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    font-weight: 600;
+    color: #a5b4fc;
+    pointer-events: none;
+    z-index: 50;
+    gap: 4px;
+    letter-spacing: 0.02em;
+}
+
+/* ── Defender Focus panel (injected into Filter pane) ────────────── */
+#defFocusPanel select:focus {
+    outline: none;
+    border-color: #6366f1;
+    box-shadow: 0 0 0 1px #6366f133;
+}
+
+/* Focus card subtle pulse when entity steps */
+#dfFocusCard {
+    transition: border-color 0.2s ease;
+}
+
+/* Nav label monospace counter */
+#dfNavLabel {
+    user-select: none;
+    min-width: 56px;
+}
+
+/* ── Dashed Defender edges in Cytoscape ──────────────────────────── */
+/* Applied directly via cy.edges().style() in JS; kept here for reference.
+   Cytoscape doesn't use CSS for canvas rendering, so this is doc-only. */
+
+/* ── Scrollbar in focus panel (inherits from Z-Hound global) ──────── */
+#defFocusPanel ::-webkit-scrollbar       { width: 4px; }
+#defFocusPanel ::-webkit-scrollbar-track { background: transparent; }
+#defFocusPanel ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 2px; }
