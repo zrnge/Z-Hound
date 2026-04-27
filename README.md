@@ -3,14 +3,13 @@
 [![Live Demo](https://img.shields.io/badge/Live_Demo-zrnge.github.io%2FZ--Hound-0ea5e9?style=for-the-badge&logo=github&logoColor=white)](https://zrnge.github.io/Z-Hound/)
 [![License](https://img.shields.io/badge/License-MIT-22c55e?style=for-the-badge)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/zrnge/Z-Hound?style=for-the-badge&logo=github&color=fbbf24)](https://github.com/zrnge/Z-Hound/stargazers)
-[![Single File](https://img.shields.io/badge/Single_File-HTML-e34c26?style=for-the-badge&logo=html5&logoColor=white)](index.html)
 [![No Install](https://img.shields.io/badge/No_Install-Required-22c55e?style=for-the-badge&logo=checkmarx&logoColor=white)](https://zrnge.github.io/Z-Hound/)
 [![Offline Ready](https://img.shields.io/badge/Offline-Ready-8b5cf6?style=for-the-badge&logo=googlechrome&logoColor=white)](index.html)
 [![SharpHound](https://img.shields.io/badge/SharpHound-v3%20%7C%20v4%20%7C%20v5-c0392b?style=for-the-badge)](https://github.com/BloodHoundAD/SharpHound)
 [![AzureHound](https://img.shields.io/badge/AzureHound-Supported-0078d4?style=for-the-badge&logo=microsoftazure&logoColor=white)](https://github.com/BloodHoundAD/AzureHound)
 
-> **Single-file, browser-based Active Directory attack graph tool for SharpHound and AzureHound collection data.**  
-> No server. No install. No Neo4j. Upload a ZIP, get an interactive attack graph.
+> **Browser-based Active Directory and Azure AD attack graph tool for SharpHound and AzureHound collection data.**  
+> No server. No install. No Neo4j. Upload a ZIP or JSON, get an interactive attack graph.
 
 Built by [zrnge](https://www.github.com/zrnge)
 
@@ -21,7 +20,7 @@ Built by [zrnge](https://www.github.com/zrnge)
 **Use it online — no download required:**  
 **[https://zrnge.github.io/Z-Hound/](https://zrnge.github.io/Z-Hound/)**
 
-Or download `index.html` and open it locally for fully offline use. All processing happens in the browser — no data ever leaves your machine either way.
+Or clone the repository and open `index.html` locally for fully offline use. All processing happens in the browser — no data ever leaves your machine either way.
 
 ---
 
