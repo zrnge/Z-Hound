@@ -9,6 +9,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.28.1/cytoscape.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/dagre@0.8.5/dist/dagre.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/cytoscape-dagre@2.5.0/cytoscape-dagre.min.js"></script>
+    <link rel="stylesheet" href="defender-module.css">
     <script>
         tailwind.config = {
             theme: { extend: { colors: { dark: '#1e1e26', panel: '#252530', accent: '#7289da' } } }
@@ -44,6 +45,8 @@
             </label>
 
             <button onclick="clearGraph()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Clear</button>
+            <button onclick="saveSession()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition" title="Save graph + owned nodes to browser storage">&#128190; Save</button>
+            <button onclick="loadSession()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition" title="Restore last saved session">&#128196; Load</button>
             <button onclick="exportPNG()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export PNG</button>
             <button onclick="exportCSV()"  class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export CSV</button>
             <button onclick="exportHTML()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-xs transition">Export HTML</button>
@@ -60,19 +63,33 @@
             <select id="searchTypeFilter" onchange="handleSearchInput()"
                 class="bg-gray-800 text-white px-2 py-1.5 rounded text-xs border border-gray-600 focus:outline-none focus:border-accent shrink-0">
                 <option value="all">All Types</option>
-                <option value="User">Users</option>
-                <option value="Computer">Computers</option>
-                <option value="Group">Groups</option>
-                <option value="Domain">Domains</option>
-                <option value="OU">OUs</option>
-                <option value="GPO">GPOs</option>
-                <option value="CertTemplate">Certs</option>
-                <option value="Container">Containers</option>
+                <optgroup label="On-Prem AD">
+                    <option value="User">Users</option>
+                    <option value="Computer">Computers</option>
+                    <option value="Group">Groups</option>
+                    <option value="Domain">Domains</option>
+                    <option value="OU">OUs</option>
+                    <option value="GPO">GPOs</option>
+                    <option value="CertTemplate">Certs</option>
+                    <option value="Container">Containers</option>
+                </optgroup>
+                <optgroup label="Azure AD">
+                    <option value="AZUser">AZ Users</option>
+                    <option value="AZGroup">AZ Groups</option>
+                    <option value="AZApp">AZ Apps</option>
+                    <option value="AZServicePrincipal">AZ Service Principals</option>
+                    <option value="AZTenant">AZ Tenant</option>
+                    <option value="AZVM">AZ VMs</option>
+                    <option value="AZRole">AZ Roles</option>
+                    <option value="AZSubscription">AZ Subscriptions</option>
+                    <option value="AZResourceGroup">AZ Resource Groups</option>
+                    <option value="AZDevice">AZ Devices</option>
+                </optgroup>
             </select>
             <div class="relative w-56">
                 <input type="text" id="searchInput" placeholder="Search objects..."
                     class="bg-gray-800 text-white px-3 py-1.5 rounded text-xs w-full border border-gray-600 focus:outline-none focus:border-accent"
-                    oninput="handleSearchInput()" onfocus="handleSearchInput()">
+                    oninput="handleSearchInput()" onfocus="handleSearchInput()" onkeydown="handleSearchKeyDown(event)">
                 <ul id="searchSuggestions" class="absolute z-50 w-80 right-0 bg-gray-800 border border-gray-600 rounded mt-1 hidden max-h-72 overflow-y-auto shadow-xl"></ul>
             </div>
             <button onclick="findPathToDA()" class="bg-red-700 hover:bg-red-600 px-3 py-1.5 rounded text-xs font-bold transition">&#128293; Find DA Path</button>
@@ -92,6 +109,7 @@
         <span class="text-orange-300">Cert Templates: <span id="statCerts" class="font-bold">0</span></span>
         <span class="text-cyan-400">Relay Targets: <span id="statRelayTargets" class="font-bold">0</span></span>
         <span class="text-cyan-300">WebClient: <span id="statWebClient" class="font-bold">0</span></span>
+        <span class="text-indigo-400">High-Risk ACLs: <span id="statExposureEdges" class="font-bold">0</span></span>
         <span class="text-pink-400">Paths to DA: <span id="statPaths" class="font-bold">-</span></span>
         <button onclick="findAllPaths(); switchTab('paths')" class="ml-auto text-xs text-gray-400 hover:text-white underline">Enumerate all paths</button>
     </div>
@@ -143,6 +161,7 @@
 
         <button onclick="resetView()" class="ml-auto bg-accent hover:bg-blue-500 text-white px-3 py-1 rounded text-xs transition">Fit View</button>
         <button onclick="resetHighlight()" class="bg-gray-700 hover:bg-gray-600 text-white px-3 py-1 rounded text-xs transition">Clear Highlight</button>
+        <button id="exitFocusBtn" onclick="exitEgoNetwork()" class="hidden bg-yellow-600 hover:bg-yellow-500 text-white px-3 py-1 rounded text-xs font-bold transition">&#10006; Exit Focus</button>
     </div>
 
     <!-- ===== MAIN ===== -->
@@ -192,6 +211,18 @@
                 Upload a SharpHound ZIP or JSON file to begin
             </div>
 
+            <!-- Right-click context menu -->
+            <div id="ctxMenu" class="hidden absolute z-50 bg-gray-800 border border-gray-600 rounded shadow-xl text-xs w-48 py-1" style="min-width:170px">
+                <div id="ctxNodeName" class="px-3 py-1 text-gray-400 font-semibold truncate border-b border-gray-700 mb-1"></div>
+                <button class="ctx-item w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200" onclick="ctxCopyName()">&#128203; Copy Name</button>
+                <button class="ctx-item w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200" onclick="ctxToggleOwned()">&#9760; Toggle Owned</button>
+                <div class="border-t border-gray-700 my-1"></div>
+                <button class="ctx-item w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200" onclick="ctxFindPath()">&#128293; Find DA Path from here</button>
+                <button class="ctx-item w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200" onclick="ctxShowDetails()">&#128270; Inspect Node</button>
+                <div class="border-t border-gray-700 my-1"></div>
+                <button class="ctx-item w-full text-left px-3 py-1.5 hover:bg-gray-700 text-gray-200" onclick="ctxExpandNeighbors()">&#127760; Expand Neighbors</button>
+            </div>
+
             <!-- Developer credit -->
             <a href="https://www.github.com/zrnge" target="_blank" rel="noopener"
                class="absolute bottom-4 right-4 z-10 flex items-center gap-1.5 text-xs text-gray-600 hover:text-gray-300 transition select-none"
@@ -225,7 +256,11 @@
                 <div class="flex items-center gap-1.5 mt-1 border-t border-gray-700/50 pt-1"><span class="text-gray-500 text-xs">Azure:</span></div>
                 <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#0078d4]"></span>AZ User</div>
                 <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#00b4de]"></span>AZ Group</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#9b59b6]"></span>AZ App</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#8e44ad]"></span>AZ SP</div>
                 <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block bg-[#e74c3c]"></span>AZ VM</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#f39c12]"></span>AZ Role</div>
+                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>AZ Tenant</div>
             </div>
 
             <!-- Zoom Controls -->
@@ -251,6 +286,28 @@
     let sidIndex       = {};   // SID (uppercase) -> node display-name key
     let nameToSid      = {};   // node display-name key -> SID (uppercase)
     let gpoNames = {};  // GUID (upper, with braces) -> friendly name
+
+    // ── Pagination state ─────────────────────────────────────────────
+    let _pathsPage = 0;
+    const PATHS_PER_PAGE = 25;
+    const _riskExpanded = new Set(); // section titles that are fully expanded
+
+    function goPathsPage(p) {
+        _pathsPage = p;
+        renderPathsPanel();
+        document.getElementById('pane-paths')?.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+    function toggleRiskSection(title) {
+        if (_riskExpanded.has(title)) _riskExpanded.delete(title);
+        else _riskExpanded.add(title);
+        renderRiskReport();
+    }
+    const _edgeSecPages = {};          // keyed "nodeId||title" → page index
+    const EDGE_SEC_PER_PAGE = 15;
+    function goEdgePage(nodeId, title, page) {
+        _edgeSecPages[nodeId + '||' + title] = page;
+        showNodeDetails(nodeId);
+    }
     let activeFilters  = {
         excludeTypes:   new Set(),  // unchecked types → hidden
         excludeDomains: new Set(),  // unchecked domain names → hidden
@@ -499,6 +556,12 @@
         let items = json.data || (Array.isArray(json) ? json : []);
         if (items.length === 0) return;
 
+        // AzureHound v2 format: each item has { kind, data } — route to dedicated parser
+        if (items[0] && items[0].kind !== undefined && items[0].data !== undefined) {
+            parseAzureHound(items);
+            return;
+        }
+
         const fn = filename.toLowerCase();
         // Prefer meta.type for accurate file type detection (v5: "users", "computers", etc.)
         const metaType = (meta.type || '').toLowerCase();
@@ -730,6 +793,174 @@
                         riskWeight: EDGE_RISK[label] || 10
                     });
                 }
+            }
+        });
+    }
+
+    // ================================================================
+    // AZUREHOUND PARSER
+    // Handles AzureHound v2 output: flat data[] array of {kind, data} objects
+    // ================================================================
+    function parseAzureHound(items) {
+        const ROLE_EDGE_MAP = {
+            '62e90394-69f5-4237-9190-012177145e10': 'AZGlobalAdmin',
+            'e8611ab8-c189-46e8-94e1-60213ab1f814': 'AZPrivilegedRoleAdmin',
+        };
+        const HIGH_VALUE_ROLE_IDS = new Set([
+            '62e90394-69f5-4237-9190-012177145e10',
+            'e8611ab8-c189-46e8-94e1-60213ab1f814',
+            '9b895d92-2cd3-44c7-9d02-a6ac2d5ea5c3',
+            '7be44c8a-adaf-4e2a-84d6-ab2649e08a13',
+            '194ae4cb-b126-40b2-bd5b-6091b380977d',
+            '158c047a-c907-4556-b7ef-446551a6b5f7',
+        ]);
+        const NODE_KINDS = new Set([
+            'AZTenant','AZUser','AZGroup','AZApp','AZServicePrincipal',
+            'AZSubscription','AZResourceGroup','AZVM','AZRole','AZDevice',
+            'AZKeyVault','AZManagedIdentity','AZFunctionApp','AZLogicApp',
+            'AZContainerRegistry','AZWebApp','AZAutomationAccount',
+        ]);
+
+        const addAZEdge = (from, to, label, isAcl = false) => {
+            from = (from || '').toUpperCase();
+            to   = (to   || '').toUpperCase();
+            if (!from || !to || from === to) return;
+            if (!adNodes[from]) adNodes[from] = { name: from, displayName: from, type: 'Unknown', isAdmin: false, props: {} };
+            if (!adNodes[to])   adNodes[to]   = { name: to,   displayName: to,   type: 'Unknown', isAdmin: false, props: {} };
+            if (label && !(label in EDGE_RISK)) unknownEdgeTypes[label] = (unknownEdgeTypes[label] || 0) + 1;
+            if (!adEdges.some(e => e.from === from && e.to === to && e.label === label))
+                adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
+        };
+
+        // First pass: create node objects.
+        // AzureHound uses data.id for most kinds; AZTenant uses data.tenantId; AZSubscription uses data.subscriptionId.
+        items.forEach(item => {
+            if (!NODE_KINDS.has(item.kind)) return;
+            const d = item.data || {};
+
+            let rawId;
+            if (item.kind === 'AZTenant')       rawId = d.tenantId;
+            else if (item.kind === 'AZSubscription') rawId = d.subscriptionId;
+            else                                 rawId = d.id;
+
+            const id = (rawId || '').toUpperCase();
+            if (!id) return;
+
+            // displayName field is lowercase in AzureHound; VMs and ResourceGroups use .name
+            const displayName = d.displayName || d.name || id;
+
+            const roleIdLower = item.kind === 'AZRole' ? id.toLowerCase() : '';
+            const isHighValue = item.kind === 'AZTenant' || HIGH_VALUE_ROLE_IDS.has(roleIdLower);
+
+            if (!adNodes[id]) {
+                adNodes[id] = {
+                    name: id,
+                    displayName,
+                    type: item.kind,
+                    isAdmin: isHighValue,
+                    props: { name: displayName }
+                };
+            } else {
+                if (!adNodes[id].displayName || adNodes[id].displayName === id) adNodes[id].displayName = displayName;
+                adNodes[id].props.name = adNodes[id].displayName;
+                adNodes[id].type = item.kind;
+                if (isHighValue) adNodes[id].isAdmin = true;
+            }
+            if (isHighValue) adNodes[id].props.highvalue = true;
+        });
+
+        // Second pass: edges. All relationship kinds use nested arrays in AzureHound output.
+        items.forEach(item => {
+            const d = item.data || {};
+            switch (item.kind) {
+
+                case 'AZGroupMember':
+                    // d.members is an array of {id, ...} or null
+                    (d.members || []).forEach(m => addAZEdge(m.id, d.groupId, 'MemberOf'));
+                    break;
+
+                case 'AZGroupOwner':
+                    // d.owners is an array of {id, ...} or null
+                    (d.owners || []).forEach(o => addAZEdge(o.id, d.groupId, 'AZOwns', true));
+                    break;
+
+                case 'AZAppOwner':
+                    // d.owners[i].owner.id = owner object ID; d.owners[i].appId = target app object ID
+                    (d.owners || []).forEach(o => addAZEdge(o.owner && o.owner.id, o.appId, 'AZOwns', true));
+                    break;
+
+                case 'AZServicePrincipalOwner':
+                    // same nested pattern as AZAppOwner
+                    (d.owners || []).forEach(o => {
+                        const ownerId = (o.owner && (o.owner.id || (o.owner.properties && o.owner.properties.principalId)));
+                        addAZEdge(ownerId, o.servicePrincipalId || d.servicePrincipalId, 'AZOwns', true);
+                    });
+                    break;
+
+                case 'AZVMOwner':
+                    // d.owners[i].owner.properties.principalId → d.owners[i].virtualMachineId
+                    (d.owners || []).forEach(o => {
+                        const principalId = o.owner && o.owner.properties && o.owner.properties.principalId;
+                        addAZEdge(principalId, o.virtualMachineId || d.virtualMachineId, 'AZOwns', true);
+                    });
+                    break;
+
+                case 'AZVMUserAccessAdmin':
+                    (d.userAccessAdmins || []).forEach(ua => {
+                        const principalId = ua.userAccessAdmin && ua.userAccessAdmin.properties && ua.userAccessAdmin.properties.principalId;
+                        addAZEdge(principalId, ua.virtualMachineId || d.virtualMachineId, 'AZUserAccessAdmin', true);
+                    });
+                    break;
+
+                case 'AZSubscriptionOwner':
+                    // subscriptionId in relationships is the ARM path (/subscriptions/<guid>)
+                    // but the AZSubscription node was keyed by just the bare GUID — strip the prefix.
+                    (d.owners || []).forEach(o => {
+                        const principalId = o.owner && o.owner.properties && o.owner.properties.principalId;
+                        const rawSubId = o.subscriptionId || d.subscriptionId || '';
+                        const subId = rawSubId.replace(/^\/subscriptions\//i, '');
+                        addAZEdge(principalId, subId, 'AZOwns', true);
+                    });
+                    break;
+
+                case 'AZResourceGroupOwner':
+                    (d.owners || []).forEach(o => {
+                        const principalId = o.owner && o.owner.properties && o.owner.properties.principalId;
+                        addAZEdge(principalId, o.resourceGroupId || d.resourceGroupId, 'AZOwns', true);
+                    });
+                    break;
+
+                case 'AZResourceGroupUserAccessAdmin':
+                    (d.userAccessAdmins || []).forEach(ua => {
+                        const principalId = ua.userAccessAdmin && ua.userAccessAdmin.properties && ua.userAccessAdmin.properties.principalId;
+                        addAZEdge(principalId, ua.resourceGroupId || d.resourceGroupId, 'AZUserAccessAdmin', true);
+                    });
+                    break;
+
+                case 'AZRoleAssignment':
+                    // d.roleAssignments[i].principalId → d.roleAssignments[i].roleDefinitionId
+                    (d.roleAssignments || []).forEach(ra => {
+                        if (!ra.principalId || !ra.roleDefinitionId) return;
+                        const edgeLabel = ROLE_EDGE_MAP[ra.roleDefinitionId.toLowerCase()] || 'AZHasRole';
+                        addAZEdge(ra.principalId, ra.roleDefinitionId, edgeLabel, edgeLabel !== 'AZHasRole');
+                    });
+                    break;
+
+                case 'AZMGGrantAppRoles':
+                    addAZEdge(d.appId, d.targetAppId, 'AZMGGrantAppRoles', true);
+                    break;
+                case 'AZMGGrantRole':
+                    addAZEdge(d.appId, d.roleId, 'AZMGGrantRole', true);
+                    break;
+                case 'AZMGAddOwner':
+                    addAZEdge(d.appId, d.targetId, 'AZMGAddOwner', true);
+                    break;
+                case 'AZMGAddMember':
+                    addAZEdge(d.appId, d.targetId, 'AZMGAddMember', true);
+                    break;
+                case 'AZMGAddSecret':
+                    addAZEdge(d.appId, d.targetId, 'AZMGAddSecret', true);
+                    break;
             }
         });
     }
@@ -972,6 +1203,10 @@
         const wcEl     = document.getElementById('statWebClient');
         if (relayEl) relayEl.textContent = relayTargets;
         if (wcEl)    wcEl.textContent    = webClients;
+        // High-risk ACL count — all HIGH_RISK_ACLS edges (broader than the Critical ACLs stat)
+        const exposureEdges = adEdges.filter(e => HIGH_RISK_ACLS.has(e.label)).length;
+        const exposureEl = document.getElementById('statExposureEdges');
+        if (exposureEl) exposureEl.textContent = exposureEdges;
         document.getElementById('statsBar').classList.remove('hidden');
     }
 
@@ -1032,6 +1267,7 @@
             if (result) foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1 });
         });
         foundPaths.sort((a, b) => a.hops - b.hops);
+        _pathsPage = 0;
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
@@ -1077,7 +1313,8 @@
         AZUser: '#0078d4', AZGroup: '#00b4de', AZDevice: '#00b294',
         AZApp: '#9b59b6', AZServicePrincipal: '#8e44ad', AZTenant: '#c0392b',
         AZSubscription: '#e67e22', AZResourceGroup: '#d35400',
-        AZVM: '#e74c3c', AZKeyVault: '#f39c12', AZMgmtGroup: '#8e44ad'
+        AZVM: '#e74c3c', AZKeyVault: '#f39c12', AZMgmtGroup: '#8e44ad',
+        AZRole: '#f39c12', AZManagedIdentity: '#1abc9c'
     };
 
     const NODE_SHAPES = {
@@ -1118,9 +1355,11 @@
             return nameToSid[id] || n.props?.objectsid || n.props?.domainsid || id;
         }
         const mode = document.getElementById('labelMode')?.value || 'short';
-        if (mode === 'full')  return n.name;
+        // Use displayName (human-readable) when available — Azure nodes are keyed by GUID
+        const displayName = n.displayName || n.name;
+        if (mode === 'full')  return displayName;
         if (mode === 'type')  return `[${n.type}]`;
-        const base = n.name.split('@')[0].split('\\').pop();
+        const base = displayName.split('@')[0].split('\\').pop();
         // For GPOs: prefer friendly name over GUID
         if (n.type === 'GPO') {
             const friendly = resolveGPOName(id);
@@ -1238,12 +1477,19 @@
         });
 
         cy.on('tap', 'node', evt => showNodeDetails(evt.target.id()));
+        cy.on('cxttap', 'node', evt => {
+            const pos = evt.originalEvent;
+            showCtxMenu(pos.clientX, pos.clientY, evt.target.id());
+        });
+        cy.on('tap', evt => { if (evt.target === cy) hideCtxMenu(); });
         cy.on('tap', 'edge', evt => {
             const label = evt.target.data('label');
             const src   = evt.target.data('source');
             const tgt   = evt.target.data('target');
-            const srcName = adNodes[src]?.name.split('@')[0] || src;
-            const tgtName = adNodes[tgt]?.name.split('@')[0] || tgt;
+            const srcNode = adNodes[src];
+            const tgtNode = adNodes[tgt];
+            const srcName = (srcNode ? (srcNode.displayName || srcNode.name) : src).split('@')[0];
+            const tgtName = (tgtNode ? (tgtNode.displayName || tgtNode.name) : tgt).split('@')[0];
             const desc = EDGE_DESCRIPTIONS[label] || 'No description available.';
             document.getElementById('pane-details').innerHTML =
                 `<div class="p-3">
@@ -1369,6 +1615,21 @@
                 }
             });
             filteredNodeIds = filteredNodeIds.filter(id => connected.has(id));
+        } else if (qv === 'az_globaladmin') {
+            const gaNodes = new Set(filteredEdges.filter(e => e.label === 'AZGlobalAdmin').flatMap(e => [e.from, e.to]));
+            filteredNodeIds = filteredNodeIds.filter(id => gaNodes.has(id));
+        } else if (qv === 'az_privrole') {
+            const prNodes = new Set(filteredEdges.filter(e => ['AZGlobalAdmin','AZPrivilegedRoleAdmin'].includes(e.label)).flatMap(e => [e.from, e.to]));
+            filteredNodeIds = filteredNodeIds.filter(id => prNodes.has(id));
+        } else if (qv === 'az_owners') {
+            const ownerNodes = new Set(filteredEdges.filter(e => e.label === 'AZOwns').flatMap(e => [e.from, e.to]));
+            filteredNodeIds = filteredNodeIds.filter(id => ownerNodes.has(id));
+        } else if (qv === 'az_vms') {
+            const vmNodes = new Set(filteredNodeIds.filter(id => adNodes[id]?.type === 'AZVM'));
+            filteredEdges.forEach(e => {
+                if (vmNodes.has(e.from) || vmNodes.has(e.to)) { vmNodes.add(e.from); vmNodes.add(e.to); }
+            });
+            filteredNodeIds = filteredNodeIds.filter(id => vmNodes.has(id));
         }
 
         const nodeSet = new Set(filteredNodeIds);
@@ -1478,6 +1739,42 @@
                 relayGrp.appendChild(o3);
             }
             select.appendChild(relayGrp);
+        }
+
+        // Azure quick views
+        const azureNodes = Object.values(adNodes).filter(n => n.type && n.type.startsWith('AZ'));
+        const azGACount  = adEdges.filter(e => e.label === 'AZGlobalAdmin').length;
+        const azPRCount  = adEdges.filter(e => e.label === 'AZPrivilegedRoleAdmin').length;
+        const azVMCount  = Object.values(adNodes).filter(n => n.type === 'AZVM').length;
+        if (azureNodes.length > 0) {
+            const azGrp = document.createElement('optgroup');
+            azGrp.label = 'Azure AD Attack Paths';
+            if (azGACount > 0) {
+                const o = document.createElement('option');
+                o.value = 'az_globaladmin';
+                o.textContent = `Global Admin Paths (${azGACount} edges)`;
+                azGrp.appendChild(o);
+            }
+            if (azPRCount + azGACount > 0) {
+                const o = document.createElement('option');
+                o.value = 'az_privrole';
+                o.textContent = 'Privileged Role Assignments';
+                azGrp.appendChild(o);
+            }
+            const azOwnerCount = adEdges.filter(e => e.label === 'AZOwns').length;
+            if (azOwnerCount > 0) {
+                const o = document.createElement('option');
+                o.value = 'az_owners';
+                o.textContent = `Azure Ownership Edges (${azOwnerCount})`;
+                azGrp.appendChild(o);
+            }
+            if (azVMCount > 0) {
+                const o = document.createElement('option');
+                o.value = 'az_vms';
+                o.textContent = `Azure VMs + Access (${azVMCount})`;
+                azGrp.appendChild(o);
+            }
+            if (azGrp.children.length > 0) select.appendChild(azGrp);
         }
 
         // Edge categories
@@ -1978,8 +2275,13 @@
             </div>`;
         }
 
+        const displayLabel = isSidNode ? nodeId : (n.displayName || n.name);
         html += `<div class="mb-3">
-            <div class="font-bold text-sm text-white break-all">${esc(isSidNode ? nodeId : n.name)}</div>
+            <div class="flex items-start justify-between gap-2">
+                <div class="font-bold text-sm text-white break-all">${esc(displayLabel)}</div>
+                <button onclick="navigator.clipboard.writeText(${esc(JSON.stringify(displayLabel))}).then(()=>this.textContent='&#10003;').catch(()=>{}); setTimeout(()=>this.textContent='&#9192;',1200)"
+                    class="shrink-0 text-gray-500 hover:text-gray-200 text-xs px-1.5 py-0.5 rounded hover:bg-gray-700 transition" title="Copy name">&#9192;</button>
+            </div>
             <div class="flex flex-wrap items-center gap-1.5 mt-1.5">
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="background:${nc}22;color:${nc};border:1px solid ${nc}55">${esc(n.type)}</span>
                 <span class="px-2 py-0.5 rounded text-xs font-semibold" style="color:${rc};border:1px solid ${rc}44">${getRiskLabel(score)} Risk &bull; ${score}/100</span>
@@ -2277,20 +2579,20 @@
             </div>`;
         }
 
-        if (adminOn.length)  html += renderEdgeSection('Local Admin On',          adminOn,    nodeId, true);
-        if (rdpOn.length)    html += renderEdgeSection('RDP Access To',            rdpOn,      nodeId, true);
-        if (psOn.length)     html += renderEdgeSection('PS-Remote To',             psOn,       nodeId, true);
-        if (adminBy.length)  html += renderEdgeSection('Local Admins (inbound)',   adminBy,    nodeId, false);
-        if (rdpBy.length)    html += renderEdgeSection('RDP Users (inbound)',      rdpBy,      nodeId, false);
-        if (contains.length) html += renderEdgeSection('Contains',                 contains,   nodeId, true);
-        if (gpLinksOut.length) html += renderEdgeSection('Linked GPOs',            gpLinksOut, nodeId, true);
-        if (gpLinks.length)  html += renderEdgeSection('Linked To (Domains/OUs)', gpLinks,    nodeId, false);
+        if (adminOn.length)  html += renderEdgeSection('Local Admin On',          adminOn,    nodeId, true,  nodeId);
+        if (rdpOn.length)    html += renderEdgeSection('RDP Access To',            rdpOn,      nodeId, true,  nodeId);
+        if (psOn.length)     html += renderEdgeSection('PS-Remote To',             psOn,       nodeId, true,  nodeId);
+        if (adminBy.length)  html += renderEdgeSection('Local Admins (inbound)',   adminBy,    nodeId, false, nodeId);
+        if (rdpBy.length)    html += renderEdgeSection('RDP Users (inbound)',      rdpBy,      nodeId, false, nodeId);
+        if (contains.length) html += renderEdgeSection('Contains',                 contains,   nodeId, true,  nodeId);
+        if (gpLinksOut.length) html += renderEdgeSection('Linked GPOs',            gpLinksOut, nodeId, true,  nodeId);
+        if (gpLinks.length)  html += renderEdgeSection('Linked To (Domains/OUs)', gpLinks,    nodeId, false, nodeId);
 
         const shownLabels = new Set(['AdminTo','CanRDP','CanPSRemote','Contains','GPLink']);
         const outOther = adEdges.filter(e => e.from === nodeId && !shownLabels.has(e.label));
         const inOther  = adEdges.filter(e => e.to   === nodeId && !shownLabels.has(e.label));
-        if (outOther.length) html += renderEdgeSection('Other Outgoing', outOther, nodeId, true);
-        if (inOther.length)  html += renderEdgeSection('Other Incoming', inOther,  nodeId, false);
+        if (outOther.length) html += renderEdgeSection('Other Outgoing', outOther, nodeId, true,  nodeId);
+        if (inOther.length)  html += renderEdgeSection('Other Incoming', inOther,  nodeId, false, nodeId);
 
         // Analysis shortcuts (BloodHound-style Analysis tab content, inline)
         html += renderAnalysisShortcuts(nodeId, n.type);
@@ -2308,10 +2610,43 @@
         }
     }
 
-    function renderEdgeSection(title, edges, selfId, isOut) {
+    function renderEdgeSection(title, edges, selfId, isOut, nodeId) {
         if (!edges.length) return '';
-        const MAX = 25;
-        const shown = edges.slice(0, MAX);
+        const key        = (nodeId || selfId) + '||' + title;
+        const totalPages = Math.max(1, Math.ceil(edges.length / EDGE_SEC_PER_PAGE));
+        let   page       = Math.min(_edgeSecPages[key] || 0, totalPages - 1);
+        const start      = page * EDGE_SEC_PER_PAGE;
+        const shown      = edges.slice(start, start + EDGE_SEC_PER_PAGE);
+        const nid        = esc(JSON.stringify(nodeId || selfId));
+        const ttl        = esc(JSON.stringify(title));
+
+        const btnBase = 'px-1.5 py-0.5 rounded text-xs font-mono transition';
+        const btnOn   = btnBase + ' text-gray-300 hover:bg-gray-700';
+        const btnOff  = btnBase + ' text-gray-600 cursor-not-allowed';
+
+        let pagCtrl = '';
+        if (totalPages > 1) {
+            const prevDis = page === 0;
+            const nextDis = page >= totalPages - 1;
+            let pageNums = '';
+            for (let pg = 0; pg < totalPages; pg++) {
+                if (pg === 0 || pg === totalPages - 1 || (pg >= page - 2 && pg <= page + 2)) {
+                    pageNums += `<button onclick="goEdgePage(${nid},${ttl},${pg})"
+                        class="${btnBase} ${pg === page ? 'bg-indigo-700 text-white font-bold' : btnOn}">${pg + 1}</button>`;
+                } else if (pg === page - 3 || pg === page + 3) {
+                    pageNums += `<span class="text-gray-600 text-xs px-0.5">…</span>`;
+                }
+            }
+            pagCtrl = `<div class="flex items-center gap-1 mt-1.5 flex-wrap">
+                <button onclick="goEdgePage(${nid},${ttl},${page - 1})"
+                    class="${prevDis ? btnOff : btnOn}" ${prevDis ? 'disabled' : ''}>‹ Prev</button>
+                ${pageNums}
+                <button onclick="goEdgePage(${nid},${ttl},${page + 1})"
+                    class="${nextDis ? btnOff : btnOn}" ${nextDis ? 'disabled' : ''}>Next ›</button>
+                <span class="text-gray-600 text-xs ml-1">${start + 1}–${Math.min(start + EDGE_SEC_PER_PAGE, edges.length)} of ${edges.length}</span>
+            </div>`;
+        }
+
         return `<div class="mb-3">
             <div class="text-gray-400 font-semibold mb-1.5 text-xs uppercase tracking-wide">${title} (${edges.length})</div>
             ${shown.map(e => {
@@ -2327,7 +2662,7 @@
                     ${other?.isAdmin ? '<span class="text-yellow-400 text-xs shrink-0">&#9733;</span>' : ''}
                 </div>`;
             }).join('')}
-            ${edges.length > MAX ? `<div class="text-gray-600 text-xs pl-1">...and ${edges.length - MAX} more</div>` : ''}
+            ${pagCtrl}
         </div>`;
     }
 
@@ -2417,10 +2752,11 @@
 
         const allTypes  = [...new Set(Object.values(adNodes).map(n => n.type))].sort();
         const domains   = Object.entries(adNodes).filter(([,n]) => n.type === 'Domain');
+        const nodeSortLabel = n => (n.displayName || n.name).toLowerCase();
         const ous       = Object.entries(adNodes).filter(([,n]) => n.type === 'OU')
-                                .sort(([,a],[,b]) => a.name.localeCompare(b.name));
-        const groups    = Object.entries(adNodes).filter(([,n]) => n.type === 'Group')
-                                .sort(([,a],[,b]) => a.name.localeCompare(b.name));
+                                .sort(([,a],[,b]) => nodeSortLabel(a).localeCompare(nodeSortLabel(b)));
+        const groups    = Object.entries(adNodes).filter(([,n]) => n.type === 'Group' || n.type === 'AZGroup')
+                                .sort(([,a],[,b]) => nodeSortLabel(a).localeCompare(nodeSortLabel(b)));
 
         const activeCount = activeFilters.excludeTypes.size + activeFilters.excludeDomains.size +
                             activeFilters.includeOUs.size   + activeFilters.includeGroups.size;
@@ -2455,7 +2791,7 @@
             domains.forEach(([id, node]) => {
                 const dom = (node.props?.domain || node.name || '').toUpperCase();
                 const chk = !activeFilters.excludeDomains.has(dom) ? 'checked' : '';
-                const short = node.name.split('@')[0];
+                const short = (node.displayName || node.name).split('@')[0];
                 html += `<label class="flex items-center gap-2 py-1 px-1.5 hover:bg-gray-800/60 rounded cursor-pointer">
                     <input type="checkbox" class="accent-purple-500" ${chk}
                         onchange="toggleDomainFilter('${esc(dom)}',this.checked)">
@@ -2476,7 +2812,7 @@
             ous.forEach(([id, node]) => {
                 const tok  = nodeToken(id);
                 const sel  = activeFilters.includeOUs.has(id);
-                const short= node.name.split('@')[0];
+                const short= (node.displayName || node.name).split('@')[0];
                 const memberCount = adEdges.filter(e => e.from === id && e.label === 'Contains').length;
                 html += `<button data-ou-token="${tok}" onclick="toggleOUFilter('${tok}')"
                     class="w-full text-left px-2 py-1 rounded text-xs flex items-center justify-between transition"
@@ -2501,7 +2837,7 @@
             groups.forEach(([id, node]) => {
                 const tok  = nodeToken(id);
                 const sel  = activeFilters.includeGroups.has(id);
-                const short= node.name.split('@')[0];
+                const short= (node.displayName || node.name).split('@')[0];
                 const memberCount = adEdges.filter(e => e.to === id && e.label === 'MemberOf').length;
                 html += `<div><button data-grp-token="${tok}" onclick="toggleGroupFilter('${tok}')"
                     class="w-full text-left px-2 py-1 rounded text-xs flex items-center justify-between transition"
@@ -2564,6 +2900,7 @@
             if (result) foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1, fromOwned: true });
         });
         foundPaths.sort((a, b) => a.hops - b.hops);
+        _pathsPage = 0;
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
@@ -2685,6 +3022,32 @@
                 renderPathsPanel(); switchTab('paths'); return;
             }
 
+        } else if (qtype === 'azure_owners') {
+            adEdges.filter(e => e.label === 'AZOwns').forEach(e => {
+                const fromN = adNodes[e.from];
+                const toN   = adNodes[e.to];
+                const fromLabel = (fromN ? (fromN.displayName || fromN.name) : e.from).split('@')[0];
+                const toLabel   = (toN   ? (toN.displayName   || toN.name)   : e.to).split('@')[0];
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: ['AZOwns'] }, hops: 1, queryLabel: `${fromLabel} owns ${toLabel}` });
+            });
+            if (!foundPaths.length) {
+                document.getElementById('statusMessage').textContent = 'No Azure ownership edges found — load AzureHound data.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+
+        } else if (qtype === 'azure_roles') {
+            adEdges.filter(e => ['AZGlobalAdmin','AZPrivilegedRoleAdmin','AZHasRole'].includes(e.label)).forEach(e => {
+                const fromN = adNodes[e.from];
+                const toN   = adNodes[e.to];
+                const fromLabel = (fromN ? (fromN.displayName || fromN.name) : e.from).split('@')[0];
+                const toLabel   = (toN   ? (toN.displayName   || toN.name)   : e.to).split('@')[0];
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: [e.label] }, hops: 1, queryLabel: `${fromLabel} —[${e.label}]→ ${toLabel}` });
+            });
+            if (!foundPaths.length) {
+                document.getElementById('statusMessage').textContent = 'No Azure role assignments found — load AzureHound data.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+
         } else if (qtype === 'ntlm_relay') {
             // SMB relay targets: computers with signing not required → BFS to DA
             const relayTargets = Object.keys(adNodes).filter(id => {
@@ -2775,9 +3138,58 @@
                 if (seen.has(key)) return false;
                 seen.add(key); return true;
             });
+
+        } else if (qtype === 'shadow_admin') {
+            // Accounts with DA-equivalent rights on Tier 0 objects but not in DA/EA
+            const t0 = new Set();
+            Object.keys(adNodes).forEach(id => {
+                const n = adNodes[id];
+                if (n.isAdmin) t0.add(id);
+                if (n.type === 'Domain') t0.add(id);
+                if (n.type === 'Group' && /domain admins|enterprise admins|administrators/i.test(n.name)) t0.add(id);
+            });
+            const shadowEdges = ['GenericAll','WriteDacl','WriteOwner','Owns','ForceChangePassword',
+                                 'AddMember','AllExtendedRights','GenericWrite','AddKeyCredentialLink','AddAllowedToAct'];
+            adEdges.filter(e => shadowEdges.includes(e.label) && t0.has(e.to) && !adNodes[e.from]?.isAdmin).forEach(e => {
+                foundPaths.push({ from: e.from, path: { nodes: [e.from, e.to], edges: [e.label] }, hops: 1, queryLabel: `Shadow Admin: ${e.label}` });
+            });
+
+        } else if (qtype === 'stale') {
+            // Enabled accounts inactive > 90 days that still hold risky outbound edges
+            const cutoff = Math.floor(Date.now() / 1000) - 90 * 86400;
+            Object.keys(adNodes).forEach(id => {
+                const n = adNodes[id];
+                if (n.props?.enabled === false || !['User','Computer'].includes(n.type)) return;
+                const ll = n.props?.lastlogon || n.props?.lastlogontimestamp || 0;
+                if (ll <= 0 || ll >= cutoff) return;
+                const risky = adEdges.filter(e => e.from === id && HIGH_RISK_ACLS.has(e.label));
+                if (!risky.length) return;
+                const daysAgo = Math.floor((Date.now() / 1000 - ll) / 86400);
+                foundPaths.push({ from: id, path: { nodes: [id], edges: [] }, hops: 0, queryLabel: `Stale ${daysAgo}d — ${risky.length} risky edge(s)` });
+            });
+
+        } else if (qtype === 'golden_ticket') {
+            // Who can reach krbtgt or write to a DC — Golden Ticket / Silver Ticket surface
+            const t0 = new Set();
+            Object.keys(adNodes).forEach(id => {
+                const n = adNodes[id];
+                if (/krbtgt/i.test(n.name)) t0.add(id);
+                if (n.type === 'Computer' && n.isAdmin) t0.add(id);  // DCs are marked isAdmin
+            });
+            if (!t0.size) {
+                document.getElementById('statusMessage').textContent = 'No krbtgt or DC nodes found in this dataset.';
+                renderPathsPanel(); switchTab('paths'); return;
+            }
+            const nonT0 = Object.keys(adNodes).filter(id => !t0.has(id) && !adNodes[id].isAdmin);
+            nonT0.forEach(id => {
+                const r = bfsPath(id, t0);
+                if (r && r.nodes.length > 1)
+                    foundPaths.push({ from: id, path: r, hops: r.nodes.length - 1, queryLabel: '→ krbtgt / DC' });
+            });
         }
 
         foundPaths.sort((a, b) => a.hops - b.hops);
+        _pathsPage = 0;
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
@@ -2806,12 +3218,17 @@
             <button onclick="runQuery('writable')"       class="px-2 py-0.5 rounded text-xs bg-purple-900/50 text-purple-300 border border-purple-700/50 hover:bg-purple-800/60 transition">Writable ACLs</button>
             <button onclick="runQuery('forest')"         class="px-2 py-0.5 rounded text-xs bg-teal-900/50 text-teal-300 border border-teal-700/50 hover:bg-teal-800/60 transition">Forest Trusts</button>
             <button onclick="runQuery('adcs')"           class="px-2 py-0.5 rounded text-xs bg-orange-900/50 text-orange-300 border border-orange-700/50 hover:bg-orange-800/60 transition">ADCS ESC</button>
-            <button onclick="runQuery('azure_ga')"      class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">Azure GA</button>
+            <button onclick="runQuery('azure_ga')"       class="px-2 py-0.5 rounded text-xs bg-blue-900/50 text-blue-300 border border-blue-700/50 hover:bg-blue-800/60 transition">Azure GA</button>
+            <button onclick="runQuery('azure_owners')"  class="px-2 py-0.5 rounded text-xs bg-blue-900/40 text-blue-300 border border-blue-700/40 hover:bg-blue-800/50 transition">Azure Owners</button>
+            <button onclick="runQuery('azure_roles')"   class="px-2 py-0.5 rounded text-xs bg-indigo-900/50 text-indigo-300 border border-indigo-700/50 hover:bg-indigo-800/60 transition">Azure Roles</button>
             <button onclick="runQuery('ntlm_relay')"     class="px-2 py-0.5 rounded text-xs bg-cyan-900/50 text-cyan-300 border border-cyan-700/50 hover:bg-cyan-800/60 transition">Relay Targets</button>
             <button onclick="runQuery('webclient')"      class="px-2 py-0.5 rounded text-xs bg-cyan-900/40 text-cyan-300 border border-cyan-700/40 hover:bg-cyan-800/50 transition">WebClient</button>
             <button onclick="runQuery('relay_chain')"    class="px-2 py-0.5 rounded text-xs bg-cyan-900/60 text-cyan-200 border border-cyan-600/60 hover:bg-cyan-800/70 transition font-semibold">⚡ Relay Chain</button>
             <button onclick="findPathsFromOwned()" id="btnFindOwned"
-                class="px-2 py-0.5 rounded text-xs bg-green-900/50 text-green-300 border border-green-700/50 hover:bg-green-800/60 transition">☠ From Owned (0)</button>
+                class="px-2 py-0.5 rounded text-xs bg-green-900/50 text-green-300 border border-green-700/50 hover:bg-green-800/60 transition">&#9760; From Owned (0)</button>
+            <button onclick="runQuery('shadow_admin')"  class="px-2 py-0.5 rounded text-xs bg-violet-900/50 text-violet-300 border border-violet-700/50 hover:bg-violet-800/60 transition">&#128373; Shadow Admins</button>
+            <button onclick="runQuery('stale')"         class="px-2 py-0.5 rounded text-xs bg-gray-700/80 text-gray-300 border border-gray-600/60 hover:bg-gray-600/80 transition">&#128336; Stale Accounts</button>
+            <button onclick="runQuery('golden_ticket')" class="px-2 py-0.5 rounded text-xs bg-yellow-900/60 text-yellow-200 border border-yellow-700/60 hover:bg-yellow-800/70 transition font-semibold">&#127775; Golden Ticket</button>
         </div>
     </div>
     <div class="border-t border-gray-700/60 mb-2"></div>`;
@@ -2822,27 +3239,41 @@
             return;
         }
 
-        html += `<div class="text-gray-400 text-xs mb-2 font-semibold">${foundPaths.length} result(s)</div>`;
+        const totalPaths  = foundPaths.length;
+        const totalPages  = Math.max(1, Math.ceil(totalPaths / PATHS_PER_PAGE));
+        _pathsPage = Math.min(_pathsPage, totalPages - 1);
+        const pageStart   = _pathsPage * PATHS_PER_PAGE;
+        const pageEnd     = Math.min(pageStart + PATHS_PER_PAGE, totalPaths);
 
-        foundPaths.slice(0, 100).forEach((p, i) => {
+        html += `<div class="flex items-center justify-between mb-2">
+            <span class="text-gray-400 text-xs font-semibold">${totalPaths} result(s)</span>
+            <span class="text-gray-500 text-xs">${pageStart + 1}–${pageEnd} of ${totalPaths}</span>
+        </div>`;
+
+        const nodeShortLabel = id => {
+            const n = adNodes[id];
+            const base = n ? (n.displayName || n.name) : id;
+            return base.split('@')[0].split('\\').pop();
+        };
+
+        foundPaths.slice(pageStart, pageEnd).forEach((p, relIdx) => {
+            const globalIdx  = pageStart + relIdx;
             const nodes = p.path.nodes;
             const edges = p.path.edges;
             const color = p.hops === 0 ? '#e74c3c' : p.hops <= 2 ? '#e74c3c' : p.hops <= 4 ? '#e67e22' : '#f1c40f';
             const label = p.queryLabel || (p.hops === 0 ? 'Direct' : p.hops <= 2 ? 'Critical' : p.hops <= 4 ? 'High' : 'Medium');
-            const startShort = nodes[0].split('@')[0].split('\\').pop();
-            const endShort   = nodes[nodes.length - 1].split('@')[0].split('\\').pop();
+            const startShort = nodeShortLabel(nodes[0]);
+            const endShort   = nodeShortLabel(nodes[nodes.length - 1]);
 
-            // Build rich path string with edge labels
             let chainParts = [];
             nodes.forEach((n, idx) => {
-                chainParts.push(n.split('@')[0].split('\\').pop());
+                chainParts.push(nodeShortLabel(n));
                 if (edges[idx]) chainParts.push(`—[${edges[idx]}]→`);
             });
             const chainStr = chainParts.join(' ');
 
-            const tok = nodeToken(nodes[0]);
             html += `<div class="mb-2 p-2 bg-gray-800/70 rounded border border-gray-700/60 hover:border-gray-500/60 cursor-pointer"
-                          onclick="highlightPath(foundPaths[${i}].path.nodes)">
+                          onclick="highlightPath(foundPaths[${globalIdx}].path.nodes)">
                 <div class="flex items-center justify-between mb-0.5">
                     <span class="font-semibold text-xs truncate text-gray-200">${esc(startShort)} → ${esc(endShort)}</span>
                     <span class="text-xs px-1.5 py-0 rounded ml-2 shrink-0" style="color:${color};border:1px solid ${color}44">${esc(label)} (${p.hops} hops)</span>
@@ -2852,8 +3283,31 @@
             </div>`;
         });
 
-        if (foundPaths.length > 100) {
-            html += `<div class="text-gray-600 text-xs text-center py-2">...and ${foundPaths.length - 100} more</div>`;
+        // Pagination controls
+        if (totalPages > 1) {
+            const btnCls = 'px-2 py-0.5 rounded text-xs transition';
+            const onCls  = 'bg-gray-700 hover:bg-gray-600 text-white';
+            const offCls = 'bg-gray-800/40 text-gray-600 cursor-not-allowed';
+            html += `<div class="flex items-center justify-between mt-2 pt-2 border-t border-gray-700/60">
+                <button onclick="goPathsPage(${_pathsPage - 1})"
+                    class="${btnCls} ${_pathsPage > 0 ? onCls : offCls}"
+                    ${_pathsPage === 0 ? 'disabled' : ''}>← Prev</button>
+                <div class="flex gap-1">`;
+            const window_half = 2;
+            for (let pg = 0; pg < totalPages; pg++) {
+                if (pg === 0 || pg === totalPages - 1 ||
+                    (pg >= _pathsPage - window_half && pg <= _pathsPage + window_half)) {
+                    html += `<button onclick="goPathsPage(${pg})"
+                        class="${btnCls} ${pg === _pathsPage ? 'bg-accent text-white font-bold' : onCls}">${pg + 1}</button>`;
+                } else if (pg === _pathsPage - window_half - 1 || pg === _pathsPage + window_half + 1) {
+                    html += `<span class="text-gray-600 px-1 text-xs">…</span>`;
+                }
+            }
+            html += `</div>
+                <button onclick="goPathsPage(${_pathsPage + 1})"
+                    class="${btnCls} ${_pathsPage < totalPages - 1 ? onCls : offCls}"
+                    ${_pathsPage >= totalPages - 1 ? 'disabled' : ''}>Next →</button>
+            </div>`;
         }
         pane.innerHTML = html;
         updateOwnedBadge();
@@ -2922,25 +3376,36 @@
             .sort((a, b) => b.r.score - a.r.score)
             .slice(0, 25);
 
+        const SECTION_DEFAULT = 12;
         const section = (title, color, items, renderFn) => {
             if (!items.length) return '';
+            const expanded = _riskExpanded.has(title);
+            const shown    = expanded ? items : items.slice(0, SECTION_DEFAULT);
+            const hasMore  = items.length > SECTION_DEFAULT;
             return `<div class="mb-4">
-                <div class="font-semibold text-xs mb-1.5 uppercase tracking-wide" style="color:${color}">${title} (${items.length})</div>
-                ${items.slice(0, 12).map(renderFn).join('')}
-                ${items.length > 12 ? `<div class="text-gray-600 text-xs">...and ${items.length - 12} more</div>` : ''}
+                <div class="flex items-center justify-between mb-1.5">
+                    <span class="font-semibold text-xs uppercase tracking-wide" style="color:${color}">${esc(title)} (${items.length})</span>
+                    ${hasMore ? `<button onclick="toggleRiskSection(${JSON.stringify(title)})"
+                        class="text-xs text-gray-500 hover:text-gray-300 transition underline shrink-0 ml-2">
+                        ${expanded ? 'Show less' : `Show all ${items.length}`}
+                    </button>` : ''}
+                </div>
+                ${shown.map(renderFn).join('')}
             </div>`;
         };
 
         const nodeRow = n => {
             const tok = nodeToken(n.name);
+            const dispN = (n.displayName || n.name).split('@')[0];
             return `<div class="py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer text-gray-300 text-xs node-link truncate"
-                         onclick="focusNode(_nodeTokens['${tok}'])">${esc(n.name.split('@')[0])}</div>`;
+                         onclick="focusNode(_nodeTokens['${tok}'])">${esc(dispN)}</div>`;
         };
 
         // Summary block
         const typeCounts = {};
         vals.forEach(n => { typeCounts[n.type] = (typeCounts[n.type] || 0) + 1; });
-        const typeOrder = ['User','Computer','Group','Domain','GPO','OU','CertTemplate','Container','Unknown'];
+        const typeOrder = ['User','Computer','Group','Domain','GPO','OU','CertTemplate','Container',
+            'AZUser','AZGroup','AZApp','AZServicePrincipal','AZTenant','AZVM','AZRole','AZSubscription','AZResourceGroup','AZDevice','Unknown'];
 
         let html = `<div class="font-bold text-sm text-white mb-2">Attack Surface Report</div>`;
 
@@ -3021,8 +3486,12 @@
                         `<span class="px-1.5 py-0.5 rounded text-xs" style="background:#1d4ed822;color:#60a5fa;border:1px solid #1d4ed844">${esc(t)}: ${c}</span>`
                     ).join('')}
                 </div>`;
+            const azLabel = id => {
+                const n = adNodes[id];
+                return ((n && (n.displayName || n.name)) || id).split('@')[0];
+            };
             const azRow = (edge, color) =>
-                `<div class="text-xs py-0.5 px-1 text-gray-300">${esc(edge.from.split('@')[0])} <span style="color:${color}">${esc(edge.label)}</span> &#8594; ${esc(edge.to.split('@')[0])}</div>`;
+                `<div class="text-xs py-0.5 px-1 text-gray-300">${esc(azLabel(edge.from))} <span style="color:${color}">${esc(edge.label)}</span> &#8594; ${esc(azLabel(edge.to))}</div>`;
             if (azGAList.length) {
                 html += `<div class="text-xs font-semibold text-red-400 mb-0.5 mt-1">Global Administrators (${azGAList.length})</div>`;
                 azGAList.slice(0,8).forEach(e => { html += azRow(e,'#f87171'); });
@@ -3054,9 +3523,10 @@
                 <div class="font-semibold text-xs mb-1.5 text-orange-400 uppercase tracking-wide">Top High-Risk Nodes</div>
                 ${highRisk.map(({ n, r }) => {
                     const tok = nodeToken(n.name);
+                    const dispName = (n.displayName || n.name).split('@')[0];
                     return `<div class="flex items-center justify-between py-0.5 px-1 hover:bg-gray-800/60 rounded cursor-pointer node-link"
                                  onclick="focusNode(_nodeTokens['${tok}'])">
-                        <span class="text-gray-300 text-xs truncate">${esc(n.name.split('@')[0])}</span>
+                        <span class="text-gray-300 text-xs truncate">${esc(dispName)}</span>
                         <span class="text-xs ml-2 shrink-0 font-mono" style="color:${getRiskColor(r.score)}">${r.score}</span>
                     </div>`;
                 }).join('')}
@@ -3156,9 +3626,12 @@
             return;
         }
 
-        // Name mode
+        // Name mode — also search Azure displayName fields (nodes keyed by GUID)
         const typeFilter = document.getElementById('searchTypeFilter')?.value || 'all';
-        let matches = Object.keys(adNodes).filter(n => n.includes(q));
+        let matches = Object.keys(adNodes).filter(nodeId => {
+            const dn = (adNodes[nodeId]?.displayName || '').toUpperCase();
+            return nodeId.includes(q) || dn.includes(q);
+        });
         if (typeFilter !== 'all') matches = matches.filter(n => adNodes[n]?.type === typeFilter);
         matches = matches.slice(0, 20);
         if (!matches.length) { box.classList.add('hidden'); return; }
@@ -3168,13 +3641,15 @@
             const tok = nodeToken(m);
             const nc  = NODE_COLORS[n?.type] || '#bdc3c7';
             const sid = (n?.props?.objectsid || n?.props?.domainsid || '').toUpperCase();
+            // For display: show the human-readable name (displayName) rather than a raw GUID
+            const label = n?.displayName || m;
 
             const li = document.createElement('li');
             li.className = 'px-2 py-1.5 hover:bg-gray-700 cursor-pointer border-b border-gray-700/30 last:border-0 flex items-center gap-2';
             li.addEventListener('click', () => {
-                document.getElementById('searchInput').value = _nodeTokens[tok];
+                document.getElementById('searchInput').value = label;
                 box.classList.add('hidden');
-                focusNode(_nodeTokens[tok]);
+                showEgoNetwork(m);
             });
 
             const badge = document.createElement('span');
@@ -3184,7 +3659,7 @@
 
             const nameEl = document.createElement('span');
             nameEl.className = 'text-gray-200 text-xs truncate flex-1';
-            nameEl.textContent = m;
+            nameEl.textContent = label;
 
             li.appendChild(badge);
             li.appendChild(nameEl);
@@ -3235,6 +3710,54 @@
                 cy.animate({ center: { eles: el }, zoom: Math.max(cy.zoom(), 1.5) }, { duration: 300 });
             }
         }
+    }
+
+    // ── Ego-network (focused view) ─────────────────────────────────────
+    let egoNetworkNode = null;
+
+    function showEgoNetwork(nodeId) {
+        if (!nodeId || !adNodes[nodeId]) { focusNode(nodeId); return; }
+        egoNetworkNode = nodeId;
+
+        const neighborIds = new Set([nodeId]);
+        const neighborEdges = adEdges.filter(e => {
+            if (e.from === nodeId) { neighborIds.add(e.to);   return true; }
+            if (e.to   === nodeId) { neighborIds.add(e.from); return true; }
+            return false;
+        });
+
+        const elements = buildElements([...neighborIds], neighborEdges);
+        initCytoscape(elements);
+        showNodeDetails(nodeId);
+        document.getElementById('searchSuggestions').classList.add('hidden');
+        document.getElementById('exitFocusBtn').classList.remove('hidden');
+        document.getElementById('statusMessage').textContent = '';
+    }
+
+    function exitEgoNetwork() {
+        egoNetworkNode = null;
+        document.getElementById('exitFocusBtn').classList.add('hidden');
+        renderGraph();
+    }
+
+    function handleSearchKeyDown(e) {
+        if (e.key !== 'Enter') return;
+        const q = document.getElementById('searchInput').value.toUpperCase().trim();
+        if (!q || !Object.keys(adNodes).length) return;
+        e.preventDefault();
+        document.getElementById('searchSuggestions').classList.add('hidden');
+        // Find best match: prefer display name match, then ID match
+        let match = Object.keys(adNodes).find(id => {
+            const dn = (adNodes[id]?.displayName || '').toUpperCase();
+            return dn === q || id === q;
+        });
+        if (!match) {
+            match = Object.keys(adNodes).find(id => {
+                const dn = (adNodes[id]?.displayName || '').toUpperCase();
+                return dn.includes(q) || id.includes(q);
+            });
+        }
+        if (match) showEgoNetwork(match);
     }
 
     document.addEventListener('click', e => {
@@ -3555,10 +4078,15 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
         adNodes = {}; adEdges = []; foundPaths = []; ownedNodes = new Set();
         loadErrors = []; unknownEdgeTypes = {}; sidIndex = {}; nameToSid = {}; gpoNames = {};
         activeFilters = { excludeTypes: new Set(), excludeDomains: new Set(), includeOUs: new Set(), includeGroups: new Set() };
+        egoNetworkNode = null;
+        _pathsPage = 0;
+        _riskExpanded.clear();
+        Object.keys(_edgeSecPages).forEach(k => delete _edgeSecPages[k]);
         document.getElementById('zipInput').value      = '';
         document.getElementById('searchInput').value   = '';
         document.getElementById('quickView').innerHTML = '<option value="none">-- Show All --</option>';
         document.getElementById('statsBar').classList.add('hidden');
+        document.getElementById('exitFocusBtn').classList.add('hidden');
         document.getElementById('statusMessage').textContent = 'Upload a SharpHound ZIP or JSON file to begin';
         document.getElementById('pane-details').innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">Click any node to inspect it</div>';
         document.getElementById('pane-paths').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Use "Find DA Path" or "All Paths" above</div>';
@@ -3712,6 +4240,132 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
     });
 
     // ================================================================
+    // RIGHT-CLICK CONTEXT MENU
+    // ================================================================
+    let _ctxNodeId = null;
+    function showCtxMenu(x, y, nodeId) {
+        _ctxNodeId = nodeId;
+        const menu = document.getElementById('ctxMenu');
+        const n = adNodes[nodeId];
+        const ctxLabel = n ? (n.displayName || n.name).split('@')[0].split('\\').pop() : nodeId;
+        document.getElementById('ctxNodeName').textContent = ctxLabel;
+        menu.classList.remove('hidden');
+        // x/y are clientX/clientY (viewport coords); menu is absolute inside the graph panel
+        const container = document.getElementById('cy').parentElement;
+        const rect = container.getBoundingClientRect();
+        let lx = x - rect.left;
+        let ly = y - rect.top;
+        // Keep menu inside the container
+        const mw = 176, mh = 220;
+        if (lx + mw > rect.width)  lx = rect.width  - mw - 4;
+        if (ly + mh > rect.height) ly = rect.height - mh - 4;
+        menu.style.left = Math.max(0, lx) + 'px';
+        menu.style.top  = Math.max(0, ly) + 'px';
+    }
+    function hideCtxMenu() {
+        document.getElementById('ctxMenu').classList.add('hidden');
+        _ctxNodeId = null;
+    }
+    document.addEventListener('click', e => {
+        if (!e.target.closest('#ctxMenu')) hideCtxMenu();
+    });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') hideCtxMenu(); });
+
+    function ctxCopyName() {
+        if (!_ctxNodeId) return;
+        const n = adNodes[_ctxNodeId];
+        navigator.clipboard.writeText(n ? (n.displayName || n.name) : _ctxNodeId).catch(() => {});
+        hideCtxMenu();
+    }
+    function ctxToggleOwned() {
+        if (_ctxNodeId) toggleOwned(_ctxNodeId);
+        hideCtxMenu();
+    }
+    function ctxFindPath() {
+        if (!_ctxNodeId) return;
+        const daSet = new Set(Object.keys(adNodes).filter(id => adNodes[id].isAdmin));
+        const result = bfsPath(_ctxNodeId, daSet);
+        foundPaths = result ? [{ from: _ctxNodeId, path: result, hops: result.nodes.length - 1 }] : [];
+        _pathsPage = 0;
+        document.getElementById('statPaths').textContent = foundPaths.length;
+        renderPathsPanel(); switchTab('paths');
+        document.getElementById('statusMessage').textContent = '';
+        hideCtxMenu();
+    }
+    function ctxShowDetails() {
+        if (_ctxNodeId) showNodeDetails(_ctxNodeId);
+        hideCtxMenu();
+    }
+    function ctxExpandNeighbors() {
+        if (!_ctxNodeId || !cy) { hideCtxMenu(); return; }
+        const el = cy.getElementById(_ctxNodeId);
+        if (!el.length) { hideCtxMenu(); return; }
+        cy.nodes().style({ opacity: 0.12 });
+        cy.edges().style({ opacity: 0.04 });
+        el.closedNeighborhood().style({ opacity: 1 });
+        el.connectedEdges().style({ opacity: 0.7 });
+        hideCtxMenu();
+    }
+
+    // ================================================================
+    // SAVE / LOAD SESSION  (localStorage)
+    // ================================================================
+    function saveSession() {
+        if (!Object.keys(adNodes).length) { alert('No data to save.'); return; }
+        try {
+            const payload = JSON.stringify({
+                v: 1,
+                nodes: adNodes,
+                edges: adEdges,
+                owned: [...ownedNodes]
+            });
+            localStorage.setItem('zhound_session', payload);
+            const kb = Math.round(payload.length / 1024);
+            document.getElementById('statusMessage').textContent = `Session saved (${kb} KB). Use Load to restore.`;
+        } catch (e) {
+            alert('Session too large for browser storage — use Export CSV to save data externally.');
+        }
+    }
+    function loadSession() {
+        const raw = localStorage.getItem('zhound_session');
+        if (!raw) { alert('No saved session found. Use Save first.'); return; }
+        try {
+            const data = JSON.parse(raw);
+            if (!data.nodes || !data.edges) throw new Error('Invalid session format');
+            adNodes = data.nodes;
+            adEdges = data.edges;
+            ownedNodes = new Set(data.owned || []);
+            loadErrors = []; unknownEdgeTypes = {};
+            computeStats();
+            buildQuickViews();
+            buildFilterPanel();
+            renderRiskReport();
+            renderGraph();
+            updateOwnedBadge();
+            // Re-apply owned styling after graph is rendered
+            setTimeout(() => {
+                ownedNodes.forEach(id => {
+                    const el = cy?.getElementById(id);
+                    if (el?.length) {
+                        el.style('border-width', 4);
+                        el.style('border-color', '#00ff88');
+                        el.style('border-style', 'dashed');
+                    }
+                });
+            }, 300);
+            document.getElementById('statusMessage').textContent = '';
+        } catch (e) {
+            alert('Failed to load session: ' + e.message);
+        }
+    }
+
+    // ================================================================
+    // ADDITIONAL QUICK QUERIES
+    // ================================================================
+    // shadow_admin / stale / golden_ticket are added to runQuery below
+    // via extending the existing else-if chain
+
+    // ================================================================
     // RESIZABLE PANEL
     // ================================================================
     const resizer   = document.getElementById('resizer');
@@ -3743,5 +4397,6 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
     if (typeof cytoscapeDagre !== 'undefined') cytoscape.use(cytoscapeDagre);
 
     </script>
+    <script src="defender-module.js"></script>
 </body>
 </html>
