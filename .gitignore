@@ -1,0 +1,5 @@
+# Navy tooling metadata
+.navy/
+
+# Local test fixtures
+test-data/

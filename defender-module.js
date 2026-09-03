@@ -14,6 +14,9 @@
     let   defenderLoaded  = false;
     let   defenderEdgeCount = 0;
 
+    // Deduplication set: exact (from,to,label) triple for Defender edges
+    const defenderEdgeKeys = new Set();
+
     // Focus mode state
     const dfs = {
         active:     false,
@@ -64,10 +67,12 @@
     // ================================================================
     function defLabelToType(label) {
         const l = (label || '').toLowerCase().trim();
-        if (l === 'user' || l === 'aad-user' || l === 'identity') return 'User';
+        if (l === 'user' || l === 'identity') return 'User';
+        if (l === 'aad-user') return 'AZUser';
         if (l === 'device' || l === 'computer' ||
             l === 'microsoft.compute/virtualmachines') return 'Computer';
-        if (l === 'group' || l === 'aad-group') return 'Group';
+        if (l === 'group') return 'Group';
+        if (l === 'aad-group') return 'AZGroup';
         if (l === 'application' || l === 'aad-app' || l === 'app') return 'App';
         if (l === 'role' || l === 'role-definition' || l === 'directoryrole') return 'Role';
         if (l === 'vulnerability' || l === 'cve') return 'CVE';
@@ -83,7 +88,14 @@
         const n = (name || '').toLowerCase();
         return n.includes('global administrator') || n.includes('global admin') ||
                n.includes('domain admin') || n.includes('enterprise admin') ||
-               n.includes('privileged role admin');
+               n.includes('privileged role admin') ||
+               n.includes('exchange administrator') || n.includes('exchange admin') ||
+               n.includes('sharepoint administrator') || n.includes('sharepoint admin') ||
+               n.includes('cloud application administrator') || n.includes('cloud application admin') ||
+               n.includes('authentication administrator') || n.includes('authentication admin') ||
+               n.includes('privileged authentication administrator') ||
+               n.includes('user administrator') || n.includes('helpdesk administrator') ||
+               n.includes('intune administrator') || n.includes('endpoint administrator');
     }
 
     // ================================================================
@@ -163,6 +175,7 @@
         const iEP = col('edgeproperties');
 
         let edgesAdded = 0, mergedCount = 0;
+        const newEdges = [];
 
         for (let r = 1; r < rows.length; r++) {
             const row = rows[r];
@@ -186,22 +199,26 @@
             let edgeProps = null;
             if (epRaw) { try { edgeProps = JSON.parse(epRaw); } catch (_) {} }
 
-            // Exact dedup: same from/to/label
-            if (!adEdges.some(e => e.from === srcKey && e.to === tgtKey && e.label === edgeLbl)) {
-                adEdges.push({
+            // Exact dedup: same from/to/label using NUL delimiter
+            const edgeKey = `${srcKey}\x00${tgtKey}\x00${edgeLbl}`;
+            if (!defenderEdgeKeys.has(edgeKey)) {
+                defenderEdgeKeys.add(edgeKey);
+                const e = {
                     from: srcKey, to: tgtKey, label: edgeLbl,
                     isAcl: false,
-                    riskWeight: DEF_EDGE_RISK[edgeLbl.toLowerCase()] || 30,
+                    riskWeight: EDGE_RISK[edgeLbl] || DEF_EDGE_RISK[edgeLbl.toLowerCase()] || 30,
                     _defenderSource: true,
                     _edgeProps: edgeProps,
-                });
+                };
+                adEdges.push(e);
+                newEdges.push(e);
                 edgesAdded++;
             }
         }
 
         defenderEdgeCount += edgesAdded;
         defenderLoaded = true;
-        buildAdjacency();
+        addToAdjacency(newEdges);
         afterLoad(filename, edgesAdded, mergedCount);
     }
 
@@ -244,13 +261,24 @@
         }
     }
 
+    // Incremental adjacency update for the edges just added (used after bulk load)
+    function addToAdjacency(edges) {
+        for (const e of edges) {
+            if (!e._defenderSource) continue;
+            if (!defenderAdjOut.has(e.from)) defenderAdjOut.set(e.from, []);
+            if (!defenderAdjIn.has(e.to))    defenderAdjIn.set(e.to,   []);
+            defenderAdjOut.get(e.from).push(e);
+            defenderAdjIn.get(e.to).push(e);
+        }
+    }
+
     // ================================================================
     // AFTER-LOAD ORCHESTRATION
     // ================================================================
     function afterLoad(filename, edgesAdded, merged) {
         updateExposureStat();
         buildQuickViews();          // triggers our wrapped version
-        populateFocusTypeSelector();
+        populateFocusTypeSelector(true); // preserve current selection if still valid
         buildFocusEntityList();
         addDefenderSearchTypes();
         addLegendEntries();
@@ -298,6 +326,7 @@
         const visited = new Set([nodeId]);
         const edgeSet = new Set();
         let frontier  = [nodeId];
+        const MAX_NEIGHBORHOOD = 2000; // hard cap to avoid canvas meltdown
 
         for (let h = 0; h < hops; h++) {
             const next = [];
@@ -312,6 +341,10 @@
                 }
             }
             frontier = next;
+            if (visited.size > MAX_NEIGHBORHOOD) {
+                console.warn(`[DefenderModule] Neighborhood cap hit at ${MAX_NEIGHBORHOOD} nodes; truncating.`);
+                break;
+            }
             if (!frontier.length) break;
         }
         return { nodeIds: [...visited], edges: [...edgeSet] };
@@ -339,8 +372,8 @@
         const elements = buildElements(nodeIds, allEdges);   // uses our wrapped version
         initCytoscape(elements);                              // uses our wrapped version
 
-        // Style focused entity after Cytoscape has settled
-        requestAnimationFrame(() => {
+        // Style focused entity after Cytoscape layout has finished
+        const finishFocus = () => {
             if (!cy) return;
             const focusEl = cy.getElementById(entityId);
             if (focusEl.length) {
@@ -352,10 +385,17 @@
                 });
                 cy.animate({ center: { eles: focusEl }, zoom: 2 }, { duration: 150 });
             }
-            applyDefenderEdgeStyles();
             const dt = Math.round(performance.now() - t0);
             if (dt > 200) console.warn(`[DefenderModule] Focus render took ${dt}ms`);
-        });
+        };
+
+        if (cy) {
+            const layout = cy.layout(getLayoutConfig());
+            layout.one('layoutstop', finishFocus);
+            layout.run();
+        } else {
+            finishFocus();
+        }
 
         updateFocusCard(entityId);
         updateNavLabel();
@@ -391,24 +431,19 @@
     // ================================================================
     function applyDefenderEdgeStyles() {
         if (!cy) return;
-        cy.edges().forEach(e => {
-            if (e.data('isDefender')) {
-                e.style({
-                    'line-style':         'dashed',
-                    'line-dash-pattern':  [4, 2],
-                    'line-color':         '#60a5fa',
-                    'target-arrow-color': '#60a5fa',
-                    'opacity':            0.75,
-                });
-            }
+        // Use Cytoscape selectors instead of iterating every element
+        cy.edges('[?isDefender]').style({
+            'line-style':         'dashed',
+            'line-dash-pattern':  [4, 2],
+            'line-color':         '#60a5fa',
+            'target-arrow-color': '#60a5fa',
+            'opacity':            0.75,
         });
         // Two-tone border for merged nodes
-        cy.nodes().forEach(n => {
+        cy.nodes().filter(n => {
             const node = adNodes[n.id()];
-            if (node?._sources?.length > 1) {
-                n.style({ 'border-color': '#a78bfa', 'border-width': 3 });
-            }
-        });
+            return node?._sources?.length > 1;
+        }).style({ 'border-color': '#a78bfa', 'border-width': 3 });
     }
 
     // ================================================================
@@ -478,12 +513,12 @@
         const defKeys = new Set();
         for (const e of edges) {
             if (e._defenderSource)
-                defKeys.add(`${e.from}|${e.to}|${e.label}`);
+                defKeys.add(`${e.from}\x00${e.to}\x00${e.label}`);
         }
         if (defKeys.size > 0) {
             for (const el of elements) {
                 if (el.group === 'edges') {
-                    const k = `${el.data.source}|${el.data.target}|${el.data.label}`;
+                    const k = `${el.data.source}\x00${el.data.target}\x00${el.data.label}`;
                     if (defKeys.has(k)) el.data.isDefender = true;
                 }
             }
@@ -505,7 +540,14 @@
         updateExposureStat();
     };
 
-    // 4. buildQuickViews — add Defender-specific quick views
+    // 4a. buildFilterPanel — re-inject Defender Focus panel after host rebuilds it
+    const _origBuildFilterPanel = buildFilterPanel;
+    global.buildFilterPanel = function () {
+        _origBuildFilterPanel();
+        injectDefenderFocusPanel();
+    };
+
+    // 4b. buildQuickViews — add Defender-specific quick views
     const _origBuildQuickViews = buildQuickViews;
     global.buildQuickViews = function () {
         _origBuildQuickViews();
@@ -543,9 +585,12 @@
         if (defGrp.children.length > 0) select.appendChild(defGrp);
     };
 
-    // 5. renderGraph — intercept Defender-specific quick views + focus mode
+    // 5. renderGraph — focus mode wins over everything; then Defender quick views; then default
     const _origRenderGraph = renderGraph;
     global.renderGraph = function () {
+        // Focus mode short-circuits standard render
+        if (dfs.active) { renderFocused(); return; }
+
         const qv = document.getElementById('quickView')?.value || 'none';
 
         if (qv === 'defender_cve_exposed') {
@@ -573,9 +618,6 @@
             return;
         }
 
-        // Focus mode short-circuits standard render
-        if (dfs.active) { renderFocused(); return; }
-
         _origRenderGraph();
     };
 
@@ -601,7 +643,7 @@
             const peerN   = adNodes[peer];
             const display = peerN?.props?.name || peer;
             const short   = display.split('@')[0] || display;
-            const tok     = nodeToken(peer);
+            const tok     = typeof nodeToken === 'function' ? nodeToken(peer) : peer;
             const propsHtml = e._edgeProps
                 ? Object.entries(e._edgeProps).slice(0, 4).map(([k, v]) =>
                     `<span class="text-gray-600">${esc(k)}:</span><span class="text-gray-500">${esc(String(v))}</span>`
@@ -637,7 +679,7 @@
         }
 
         html += `</div>`;
-        pane.innerHTML += html;
+        pane.insertAdjacentHTML('beforeend', html);
     };
 
     // 7. exportCSV — add Source column; full replacement when Defender data present
@@ -671,7 +713,7 @@
         const csv = rows.map(r =>
             r.map(c => {
                 const s = String(c == null ? '' : c).replace(/"/g, '""');
-                return /[,"\n]/.test(s) ? `"${s}"` : s;
+                return /[,"\n\r]/.test(s) ? `"${s}"` : s;
             }).join(',')
         ).join('\r\n');
 
@@ -689,6 +731,7 @@
         defenderNodeIds.clear();
         defenderAdjOut.clear();
         defenderAdjIn.clear();
+        defenderEdgeKeys.clear();
         defenderLoaded    = false;
         defenderEdgeCount = 0;
         dfs.active        = false;
@@ -698,6 +741,7 @@
         const btn = document.getElementById('dfToggleBtn');
         if (btn) { btn.textContent = 'Enable Focus Mode'; btn.classList.replace('bg-indigo-900','bg-indigo-700'); }
         document.getElementById('dfExitBtn')?.classList.add('hidden');
+        document.getElementById('btnDefReport')?.classList.add('hidden');
         updateExposureStat();
     };
 
@@ -729,7 +773,7 @@
     // LEGEND — append Defender type entries once
     // ================================================================
     function addLegendEntries() {
-        const legend = document.querySelector('.absolute.bottom-4.left-4.bg-panel');
+        const legend = document.getElementById('defLegend');
         if (!legend || legend.dataset.defenderLegend) return;
         legend.dataset.defenderLegend = '1';
 
@@ -763,9 +807,10 @@
     // ================================================================
     // FOCUS PANEL — type selector population
     // ================================================================
-    function populateFocusTypeSelector() {
+    function populateFocusTypeSelector(preserve = false) {
         const sel = document.getElementById('dfTypeSelect');
         if (!sel) return;
+        const prev = preserve ? sel.value : 'all';
         while (sel.options.length > 1) sel.remove(1);
 
         const counts = {};
@@ -779,6 +824,10 @@
             o.textContent = `${type} (${count})`;
             sel.appendChild(o);
         });
+
+        if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+        else sel.value = 'all';
+        if (preserve) dfs.entityType = sel.value;
     }
 
     // ================================================================
@@ -847,7 +896,8 @@
     }
 
     function injectCSVUploadButton() {
-        const zipLabel = document.querySelector('label.bg-blue-600');
+        const zipLabel = document.getElementById('zhoundUploadLabel');
+        const graphWrap = document.getElementById('cy').parentElement;
         if (!zipLabel || document.getElementById('defenderCsvInput')) return;
 
         const lbl = document.createElement('label');
@@ -865,7 +915,6 @@
         });
 
         // Drag-and-drop on the graph canvas
-        const graphWrap = document.querySelector('.flex-1.relative.overflow-hidden.bg-dark');
         if (graphWrap) {
             let overlay = null;
             const getOverlay = () => {
@@ -1249,18 +1298,20 @@ ${tbl(['Source','Src Type','Relationship','Target','Tgt Type','Properties'], all
         csvLabel.after(btn);
     }
 
-    // ── Show / hide report button via the existing clearGraph wrapper ──
-    // The clearGraph wrapper is already defined above in this IIFE;
-    // wrap it one more time to also hide the report button.
-    const _clearWithReport = global.clearGraph;
-    global.clearGraph = function () {
-        _clearWithReport();
-        document.getElementById('btnDefReport')?.classList.add('hidden');
-    };
-
-    // Run DOM injection immediately (script is at end of body, DOM is ready)
-    injectUI();
-    // Inject the report button after the CSV button exists (setTimeout 0 is enough)
-    setTimeout(injectDefenderReportButton, 0);
+    // Run DOM injection. Because the host creates tab panes lazily, retry if
+    // the required anchors are not present yet.
+    function tryInjectUI(retries = 20) {
+        injectUI();
+        injectDefenderReportButton();
+        if ((!document.getElementById('defFocusPanel') ||
+             !document.getElementById('btnDefReport')) && retries > 0) {
+            setTimeout(() => tryInjectUI(retries - 1), 100);
+        }
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => tryInjectUI());
+    } else {
+        tryInjectUI();
+    }
 
 })(window);
