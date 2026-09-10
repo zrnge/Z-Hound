@@ -284,6 +284,9 @@
     let ownedNodes = new Set();  // nodeIds marked as compromised
     let loadErrors     = [];   // { filename, error, reason }
     let unknownEdgeTypes = {}; // edgeType -> count
+    let adEdgeKeys     = new Set(); // edge dedup Set: from\x00to\x00label
+
+    function edgeKey(from, to, label) { return `${from}\x00${to}\x00${label}`; }
     let sidIndex       = {};   // SID (uppercase) -> node display-name key
     let nameToSid      = {};   // node display-name key -> SID (uppercase)
     let gpoNames = {};  // GUID (upper, with braces) -> friendly name
@@ -642,9 +645,10 @@
                 if (label && !(label in EDGE_RISK)) {
                     unknownEdgeTypes[label] = (unknownEdgeTypes[label] || 0) + 1;
                 }
-                if (!adEdges.some(e => e.from === from && e.to === to && e.label === label)) {
-                    adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
-                }
+                const k = edgeKey(from, to, label);
+                if (adEdgeKeys.has(k)) return;
+                adEdgeKeys.add(k);
+                adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
             };
 
             const parseArr = (arr, label, reverse = false) => {
@@ -787,13 +791,14 @@
             const to    = (edge.endNode   || edge.target || edge.end   || '').toUpperCase();
             const label = edge.type || edge.label || '';
             if (from && to && label) {
-                if (!adEdges.some(e => e.from === from && e.to === to && e.label === label)) {
-                    adEdges.push({
-                        from, to, label,
-                        isAcl: HIGH_RISK_ACLS.has(label),
-                        riskWeight: EDGE_RISK[label] || 10
-                    });
-                }
+                const k = edgeKey(from, to, label);
+                if (adEdgeKeys.has(k)) return;
+                adEdgeKeys.add(k);
+                adEdges.push({
+                    from, to, label,
+                    isAcl: HIGH_RISK_ACLS.has(label),
+                    riskWeight: EDGE_RISK[label] || 10
+                });
             }
         });
     }
@@ -829,8 +834,10 @@
             if (!adNodes[from]) adNodes[from] = { name: from, displayName: from, type: 'Unknown', isAdmin: false, props: {} };
             if (!adNodes[to])   adNodes[to]   = { name: to,   displayName: to,   type: 'Unknown', isAdmin: false, props: {} };
             if (label && !(label in EDGE_RISK)) unknownEdgeTypes[label] = (unknownEdgeTypes[label] || 0) + 1;
-            if (!adEdges.some(e => e.from === from && e.to === to && e.label === label))
-                adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
+            const k = edgeKey(from, to, label);
+            if (adEdgeKeys.has(k)) return;
+            adEdgeKeys.add(k);
+            adEdges.push({ from, to, label, isAcl, riskWeight: EDGE_RISK[label] || 10 });
         };
 
         // First pass: create node objects.
@@ -1006,11 +1013,14 @@
         const seen = new Set();
         adEdges = adEdges.filter(e => {
             if (!e.from || !e.to || e.from === e.to) return false;
-            const k = `${e.from}__${e.to}__${e.label}`;
+            const k = edgeKey(e.from, e.to, e.label);
             if (seen.has(k)) return false;
             seen.add(k);
             return true;
         });
+
+        // Rebuild canonical edge-key Set so later incremental loads stay consistent
+        adEdgeKeys = new Set(adEdges.map(e => edgeKey(e.from, e.to, e.label)));
     }
 
     // ================================================================
@@ -1101,11 +1111,14 @@
             const seen = new Set();
             adEdges = adEdges.filter(e => {
                 if (!e.from || !e.to || e.from === e.to) return false;
-                const k = `${e.from}__${e.to}__${e.label}`;
+                const k = edgeKey(e.from, e.to, e.label);
                 if (seen.has(k)) return false;
                 seen.add(k);
                 return true;
             });
+
+            // Rebuild canonical edge-key Set after rename
+            adEdgeKeys = new Set(adEdges.map(e => edgeKey(e.from, e.to, e.label)));
         }
     }
 
@@ -1214,13 +1227,20 @@
     // ================================================================
     // BFS PATH FINDER
     // ================================================================
+    const BFS_MAX_HOPS = 12;
+
     function bfsPath(startNode, targetSet) {
         if (!startNode || !adNodes[startNode]) return null;
         if (targetSet.has(startNode)) return { nodes: [startNode], edges: [] };
         const queue   = [{ nodes: [startNode], edges: [] }];
         const visited = new Set([startNode]);
+        let truncated = false;
         while (queue.length > 0) {
             const { nodes, edges } = queue.shift();
+            if (nodes.length - 1 >= BFS_MAX_HOPS) {
+                truncated = true;
+                continue;
+            }
             const current = nodes[nodes.length - 1];
             for (const edge of adEdges) {
                 if (edge.from !== current) continue;
@@ -1233,20 +1253,27 @@
                 queue.push({ nodes: newNodes, edges: newEdges });
             }
         }
-        return null;
+        return truncated ? { truncated: true } : null;
     }
 
     function findPathToDA() {
         const query = document.getElementById('searchInput').value.toUpperCase().trim();
         if (!query) { alert('Enter an object name to search'); return; }
-        const startNode = Object.keys(adNodes).find(n => n.includes(query));
+        const keys = Object.keys(adNodes);
+        let startNode = keys.find(n => n === query);
+        if (!startNode) startNode = keys.find(n => n.includes(query));
         if (!startNode) { alert('No object matching: ' + query); return; }
         document.getElementById('searchInput').value = startNode;
-        const daSet = new Set(Object.keys(adNodes).filter(n => adNodes[n].isAdmin));
+        const daSet = new Set(keys.filter(n => adNodes[n].isAdmin));
         if (daSet.size === 0) { alert('No high-value / Domain Admin targets found in data'); return; }
         const result = bfsPath(startNode, daSet);
         if (!result) {
             document.getElementById('statusMessage').textContent = 'No path to DA found from ' + startNode;
+            return;
+        }
+        if (result.truncated) {
+            document.getElementById('statusMessage').textContent =
+                `No path to DA found from ${startNode} within ${BFS_MAX_HOPS} hops (search limit reached).`;
             return;
         }
         document.getElementById('statusMessage').textContent = '';
@@ -1263,16 +1290,22 @@
         const sources = Object.keys(adNodes).filter(n =>
             ['User','Computer'].includes(adNodes[n].type) && !adNodes[n].isAdmin
         );
+        let truncatedCount = 0;
         sources.forEach(n => {
             const result = bfsPath(n, daSet);
-            if (result) foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1 });
+            if (!result) return;
+            if (result.truncated) { truncatedCount++; return; }
+            foundPaths.push({ from: n, path: result, hops: result.nodes.length - 1 });
         });
         foundPaths.sort((a, b) => a.hops - b.hops);
         _pathsPage = 0;
         document.getElementById('statPaths').textContent = foundPaths.length;
         renderPathsPanel();
         switchTab('paths');
-        document.getElementById('statusMessage').textContent = '';
+        const truncMsg = truncatedCount > 0
+            ? ` (${truncatedCount} source${truncatedCount > 1 ? 's' : ''} hit the ${BFS_MAX_HOPS}-hop limit)`
+            : '';
+        document.getElementById('statusMessage').textContent = truncMsg;
     }
 
     function highlightPath(pathNodes) {
@@ -1526,6 +1559,15 @@
         if (!cy) return;
         cy.nodes().removeStyle();
         cy.edges().removeStyle();
+        // Re-apply owned-node markers because removeStyle wiped them
+        ownedNodes.forEach(id => {
+            const el = cy.getElementById(id);
+            if (el.length) {
+                el.style('border-width', 4);
+                el.style('border-color', '#00ff88');
+                el.style('border-style', 'dashed');
+            }
+        });
     }
 
     function resetView() {
@@ -3319,7 +3361,9 @@
     // ================================================================
     // ADCS ESC DETECTION
     // ================================================================
+    let _adcsCache = null;
     function detectADCS() {
+        if (_adcsCache) return _adcsCache;
         const results = [];
         const certTemplates = Object.entries(adNodes).filter(([,n]) => n.type === 'CertTemplate');
 
@@ -3357,8 +3401,12 @@
             }
         });
 
+        _adcsCache = results;
         return results;
     }
+
+    // Invalidate ADCS cache whenever the graph data changes
+    function invalidateADCSCache() { _adcsCache = null; }
 
     // ================================================================
     // RISK REPORT PANEL
@@ -3772,7 +3820,8 @@
     function esc(str) {
         return String(str || '')
             .replace(/&/g,'&amp;').replace(/</g,'&lt;')
-            .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+            .replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+            .replace(/'/g,'&#39;');
     }
 
     function exportPNG() {
@@ -4084,6 +4133,7 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
         egoNetworkNode = null;
         _pathsPage = 0;
         _riskExpanded.clear();
+        invalidateADCSCache();
         Object.keys(_edgeSecPages).forEach(k => delete _edgeSecPages[k]);
         document.getElementById('zipInput').value      = '';
         document.getElementById('searchInput').value   = '';
@@ -4223,6 +4273,7 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
         resolveWellKnownSIDs();
         buildSidIndex();
         detectDCSync();
+        invalidateADCSCache();
         computeStats();
         buildQuickViews();
         buildFilterPanel();
