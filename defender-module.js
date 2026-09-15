@@ -773,9 +773,12 @@
     // LEGEND — append Defender type entries once
     // ================================================================
     function addLegendEntries() {
-        const legend = document.getElementById('defLegend');
-        if (!legend || legend.dataset.defenderLegend) return;
-        legend.dataset.defenderLegend = '1';
+        const host = document.getElementById('legendDefender');
+        if (!host) return;
+        host.classList.remove('hidden');
+        if (host.dataset.defenderLegend) return;
+        host.dataset.defenderLegend = '1';
+        const legend = host;
 
         const divider = document.createElement('div');
         divider.className = 'flex items-center gap-1.5 mt-1 border-t border-gray-700/50 pt-1';
@@ -975,7 +978,7 @@
 
     <div class="mb-2">
         <label class="text-gray-500 text-xs block mb-0.5">Entity Type</label>
-        <select id="dfTypeSelect" onchange="defenderModule.onTypeChange()"
+        <select id="dfTypeSelect" aria-label="Entity type" onchange="defenderModule.onTypeChange()"
             class="w-full bg-gray-800 text-white px-2 py-1 rounded text-xs
                    border border-gray-600 focus:outline-none focus:border-indigo-500">
             <option value="all">All Types</option>
@@ -985,7 +988,7 @@
     <div class="mb-2 flex gap-1.5">
         <div class="flex-1">
             <label class="text-gray-500 text-xs block mb-0.5">Sort By</label>
-            <select id="dfSortSelect" onchange="defenderModule.onSortChange()"
+            <select id="dfSortSelect" aria-label="Sort by" onchange="defenderModule.onSortChange()"
                 class="w-full bg-gray-800 text-white px-2 py-1 rounded text-xs
                        border border-gray-600 focus:outline-none">
                 <option value="degree">Exposure (degree)</option>
@@ -994,7 +997,7 @@
         </div>
         <div class="flex-1">
             <label class="text-gray-500 text-xs block mb-0.5">Hops</label>
-            <select id="dfHopsSelect" onchange="defenderModule.onHopsChange()"
+            <select id="dfHopsSelect" aria-label="Hops" onchange="defenderModule.onHopsChange()"
                 class="w-full bg-gray-800 text-white px-2 py-1 rounded text-xs
                        border border-gray-600 focus:outline-none">
                 <option value="1">1 – Direct</option>

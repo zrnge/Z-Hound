@@ -28,6 +28,10 @@
         .risk-low { color: #2ecc71; }
         .node-link { cursor: pointer; font-size: 11px; padding: 2px 4px; border-radius: 3px; }
         .node-link:hover { background: #374151; color: #fff; }
+        /* WCAG AA contrast fixes: gray-500/600 are too dark on the dark background */
+        .text-gray-500 { color: #a1a1aa !important; }
+        .text-gray-600 { color: #9ca3af !important; }
+        #exitFocusBtn { color: #e0e7ff !important; }
         ::-webkit-scrollbar { width: 5px; height: 5px; }
         ::-webkit-scrollbar-track { background: #1e1e26; }
         ::-webkit-scrollbar-thumb { background: #4b5563; border-radius: 3px; }
@@ -88,7 +92,7 @@
                 </optgroup>
             </select>
             <div class="relative w-56">
-                <input type="text" id="searchInput" placeholder="Search objects..."
+                <input type="text" id="searchInput" aria-label="Search objects" placeholder="Search objects..."
                     class="bg-gray-800 text-white px-3 py-1.5 rounded text-xs w-full border border-gray-600 focus:outline-none focus:border-accent"
                     oninput="handleSearchInput()" onfocus="handleSearchInput()" onkeydown="handleSearchKeyDown(event)">
                 <ul id="searchSuggestions" class="absolute z-50 w-80 right-0 bg-gray-800 border border-gray-600 rounded mt-1 hidden max-h-72 overflow-y-auto shadow-xl"></ul>
@@ -254,14 +258,17 @@
                 <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-full inline-block bg-[#d35400]"></span>Cert</div>
                 <div class="flex items-center gap-1.5 mb-1"><span class="w-3 h-3 rounded-sm inline-block bg-[#f1c40f] border border-[#e67e22]"></span>High Value</div>
                 <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>DCSync</div>
-                <div class="flex items-center gap-1.5 mt-1 border-t border-gray-700/50 pt-1"><span class="text-gray-500 text-xs">Azure:</span></div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#0078d4]"></span>AZ User</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#00b4de]"></span>AZ Group</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#9b59b6]"></span>AZ App</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#8e44ad]"></span>AZ SP</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block bg-[#e74c3c]"></span>AZ VM</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#f39c12]"></span>AZ Role</div>
-                <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>AZ Tenant</div>
+                <div id="legendAzure" class="hidden">
+                    <div class="flex items-center gap-1.5 mt-1 border-t border-gray-700/50 pt-1"><span class="text-gray-500 text-xs">Azure:</span></div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#0078d4]"></span>AZ User</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#00b4de]"></span>AZ Group</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#9b59b6]"></span>AZ App</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#8e44ad]"></span>AZ SP</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-sm inline-block bg-[#e74c3c]"></span>AZ VM</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#f39c12]"></span>AZ Role</div>
+                    <div class="flex items-center gap-1.5"><span class="w-3 h-3 rounded-full inline-block bg-[#c0392b]"></span>AZ Tenant</div>
+                </div>
+                <div id="legendDefender" class="hidden"></div>
             </div>
 
             <!-- Zoom Controls -->
@@ -1204,7 +1211,7 @@
         document.getElementById('statAsrep').textContent   = asrep;
         document.getElementById('statDcsync').textContent  = dcsync;
         document.getElementById('statAcls').textContent    = crits;
-        document.getElementById('statPaths').textContent   = '?';
+        document.getElementById('statPaths').textContent   = '-';
         const uncon        = vals.filter(n => n.props?.unconstraineddelegation).length;
         const certs        = vals.filter(n => n.type === 'CertTemplate').length;
         const relayTargets = vals.filter(n => n.type === 'Computer' && (n.props?.signing === false || n.props?.signingrequired === false)).length;
@@ -1405,7 +1412,7 @@
     function getLayoutConfig() {
         const sel = document.getElementById('layoutSel')?.value || 'dagre';
         const configs = {
-            dagre:        { name: 'dagre',        rankDir: 'LR', nodeSep: 50, rankSep: 130, padding: 30, animate: false },
+            dagre:        { name: 'dagre',        rankDir: 'LR', nodeSep: 50, rankSep: 130, padding: 50, nodeDimensionsIncludeLabels: true, animate: false },
             breadthfirst: { name: 'breadthfirst', directed: true, spacingFactor: 1.5, padding: 30, animate: false },
             cose:         { name: 'cose',         idealEdgeLength: 120, nodeOverlap: 20, fit: true, padding: 30, animate: false, numIter: 1000 },
             concentric:   { name: 'concentric',   minNodeSpacing: 60, padding: 30, animate: false, concentric: n => n.degree(), levelWidth: () => 2 },
@@ -1490,10 +1497,13 @@
                         'target-arrow-color':  ele => edgeColor(ele.data('label'), ele.data('isAcl')),
                         'target-arrow-shape':  'triangle',
                         'curve-style':         'unbundled-bezier',
-                        'control-point-step-size': 22,
+                        'control-point-step-size': 44,
+                        'edge-distances':      'intersection',
                         'label':               'data(label)',
                         'font-size':           '7px',
                         'color':               '#888',
+                        'text-rotation':       'autorotate',
+                        'text-margin-y':       -8,
                         'text-background-color':   '#1e1e26',
                         'text-background-opacity': 0.75,
                         'text-background-padding': '2px',
@@ -2821,7 +2831,7 @@
             const nc  = NODE_COLORS[t] || '#bdc3c7';
             const chk = !activeFilters.excludeTypes.has(t) ? 'checked' : '';
             html += `<label class="flex items-center gap-1 cursor-pointer px-2 py-0.5 rounded text-xs font-semibold"
-                         style="background:${nc}22;color:${nc};border:1px solid ${nc}44">
+                         style="background:${nc}22;color:#e5e7eb;border:1px solid ${nc}44">
                         <input type="checkbox" class="accent-blue-600" ${chk}
                             onchange="toggleTypeFilter('${esc(t)}',this.checked)"> ${esc(t)}
                      </label>`;
@@ -2875,7 +2885,7 @@
             html += `<div class="mb-4">
                 <div class="text-gray-400 font-semibold text-xs uppercase tracking-wide mb-1">Groups${hint}</div>
                 <div class="text-gray-600 text-xs mb-1.5">Select to show only members</div>
-                <input id="groupSearchInput" type="text" placeholder="Filter groups…" oninput="filterGroupSearch()"
+                <input id="groupSearchInput" type="text" aria-label="Filter groups" placeholder="Filter groups…" oninput="filterGroupSearch()"
                     class="w-full bg-gray-800 text-white px-2 py-1 rounded text-xs border border-gray-700 focus:outline-none focus:border-accent mb-1.5">
                 <div class="space-y-0.5 max-h-52 overflow-y-auto pr-1">`;
             groups.forEach(([id, node]) => {
@@ -4140,6 +4150,10 @@ ${critHtml}${credHtml}${delegHtml}${adcsHtml}${relayHtml}${azureHtml}${hrHtml}${
         document.getElementById('quickView').innerHTML = '<option value="none">-- Show All --</option>';
         document.getElementById('statsBar').classList.add('hidden');
         document.getElementById('exitFocusBtn').classList.add('hidden');
+        document.getElementById('legendAzure')?.classList.add('hidden');
+        document.getElementById('legendDefender')?.classList.add('hidden');
+        const _dl = document.getElementById('defLegend');
+        if (_dl) delete _dl.dataset.defenderLegend;
         document.getElementById('statusMessage').textContent = 'Upload a SharpHound ZIP or JSON file to begin';
         document.getElementById('pane-details').innerHTML = '<div class="text-gray-500 text-center text-xs mt-12">Click any node to inspect it</div>';
         document.getElementById('pane-paths').innerHTML   = '<div class="text-gray-500 text-center text-xs mt-12">Use "Find DA Path" or "All Paths" above</div>';
